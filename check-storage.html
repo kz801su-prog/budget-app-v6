@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LocalStorage Debug Tool</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        .storage-item {
+            background: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .key {
+            font-weight: bold;
+            color: #4a5568;
+            margin-bottom: 8px;
+        }
+        .value {
+            background: #f7fafc;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .metadata {
+            background: #edf2f7;
+            padding: 10px;
+            border-left: 4px solid #4299e1;
+            margin-top: 10px;
+        }
+        .btn {
+            background: #4299e1;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .btn:hover {
+            background: #3182ce;
+        }
+        .btn-danger {
+            background: #e53e3e;
+        }
+        .btn-danger:hover {
+            background: #c53030;
+        }
+    </style>
+</head>
+<body>
+    <h1>📊 Budget App - LocalStorage Debug Tool</h1>
+    <div style="margin: 20px 0;">
+        <button class="btn" onclick="refreshData()">🔄 Refresh</button>
+        <button class="btn btn-danger" onclick="clearAll()">⚠️ Clear All Data</button>
+    </div>
+    
+    <div id="storage-list"></div>
+
+    <script>
+        function refreshData() {
+            const container = document.getElementById('storage-list');
+            container.innerHTML = '';
+            
+            const keys = Object.keys(localStorage);
+            const budgetKeys = keys.filter(k => k.startsWith('budget_app_'));
+            
+            if (budgetKeys.length === 0) {
+                container.innerHTML = '<div class="storage-item"><strong>No data found in localStorage</strong></div>';
+                return;
+            }
+            
+            budgetKeys.forEach(key => {
+                const value = localStorage.getItem(key);
+                const item = document.createElement('div');
+                item.className = 'storage-item';
+                
+                const keyDiv = document.createElement('div');
+                keyDiv.className = 'key';
+                keyDiv.textContent = `🔑 ${key}`;
+                
+                const valueDiv = document.createElement('div');
+                valueDiv.className = 'value';
+                
+                try {
+                    const parsed = JSON.parse(value);
+                    valueDiv.textContent = JSON.stringify(parsed, null, 2);
+                    
+                    // Show metadata for data entries
+                    if (key !== 'budget_app_metadata') {
+                        const meta = document.createElement('div');
+                        meta.className = 'metadata';
+                        meta.innerHTML = `
+                            <strong>Metadata:</strong><br>
+                            Company: ${parsed.companyName || 'N/A'}<br>
+                            Year: ${parsed.fiscalYear || 'N/A'}<br>
+                            Last Updated: ${parsed.lastUpdated || 'N/A'}<br>
+                            Months Loaded: ${Object.keys(parsed.dataByMonth || {}).length}
+                        `;
+                        item.appendChild(meta);
+                    }
+                } catch (e) {
+                    valueDiv.textContent = value;
+                }
+                
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'btn btn-danger';
+                deleteBtn.textContent = '🗑️ Delete';
+                deleteBtn.style.marginTop = '10px';
+                deleteBtn.onclick = () => {
+                    if (confirm(`Delete ${key}?`)) {
+                        localStorage.removeItem(key);
+                        refreshData();
+                    }
+                };
+                
+                item.appendChild(keyDiv);
+                item.appendChild(valueDiv);
+                item.appendChild(deleteBtn);
+                container.appendChild(item);
+            });
+        }
+        
+        function clearAll() {
+            if (confirm('⚠️ Are you sure you want to clear ALL budget app data?')) {
+                const keys = Object.keys(localStorage);
+                const budgetKeys = keys.filter(k => k.startsWith('budget_app_'));
+                budgetKeys.forEach(k => localStorage.removeItem(k));
+                refreshData();
+                alert('All data cleared!');
+            }
+        }
+        
+        // Initial load
+        refreshData();
+    </script>
+</body>
+</html>
