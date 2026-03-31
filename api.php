@@ -137,12 +137,24 @@ switch ($action) {
     // ── プロフィール一覧取得 ───────────────────────────────
     case 'get_profiles':
         // financial_data に存在するが profiles に未登録のレコードを自動補完
-        $pdo->exec("INSERT IGNORE INTO profiles (company_name, fiscal_year, app_mode)
-                    SELECT DISTINCT company_name, fiscal_year, 'standard'
-                    FROM financial_data");
+        try {
+            $pdo->exec("INSERT IGNORE INTO profiles (company_name, fiscal_year, app_mode)
+                        SELECT DISTINCT company_name, fiscal_year, 'standard'
+                        FROM financial_data");
+        } catch (Exception $e) { /* ignore */ }
 
-        $stmt = $pdo->query("SELECT company_name, fiscal_year, app_mode FROM profiles ORDER BY last_accessed DESC");
-        echo json_encode(['success' => true, 'profiles' => $stmt->fetchAll()]);
+        $stmt     = $pdo->query("SELECT company_name, fiscal_year, app_mode FROM profiles ORDER BY last_accessed DESC");
+        $profiles = $stmt->fetchAll();
+
+        // profiles が空の場合は financial_data から直接返す
+        if (empty($profiles)) {
+            $stmt     = $pdo->query("SELECT DISTINCT company_name, fiscal_year, 'standard' AS app_mode
+                                     FROM financial_data
+                                     ORDER BY fiscal_year DESC");
+            $profiles = $stmt->fetchAll();
+        }
+
+        echo json_encode(['success' => true, 'profiles' => $profiles]);
         break;
 
     // ── プロフィール保存（app_mode 更新）────────────────────
