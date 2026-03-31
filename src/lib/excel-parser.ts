@@ -13,16 +13,21 @@ const parseNumber = (val: any): number => {
     return isNegative ? -num : num;
 };
 
-// Map sheet name to consistent department name
+/**
+ * Normalize department name from sheet name.
+ * Handles: "(3 イズライフ事業部)", "（4 プローン事業部）", "シンコー合併"
+ */
 const normalizeDeptName = (sheetName: string): string => {
     let name = sheetName.normalize('NFKC').trim();
     
-    // Pattern for "(3 イズライフ事業部)" -> "イズライフ"
-    const deptMatch = name.match(/\(\d{1,2}\s*(.*?)(?:事業部|営業所|部|課)?\)/);
-    if (deptMatch) return deptMatch[1].trim();
-
-    // Pattern for "シンコー合併" -> "シンコー合併"
-    if (name.includes('合併')) return name;
+    // Remove brackets like ( ) or （ ） and then numbers at the beginning
+    // (17 本部営業部) -> 17 本部営業部 -> 本部営業部
+    name = name.replace(/[()（）]/g, '').trim();
+    
+    const match = name.match(/^(\d+)?\s*(.*)$/);
+    if (match && match[2]) {
+        return match[2].trim();
+    }
     
     return name;
 };
@@ -32,185 +37,105 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false):
     const workbook = XLSX.read(arrayBuffer);
     let allRecords: MonthlyRecord[] = [];
 
-    const monthNamesJP = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
+    // The fiscal year starts from April (index 3 in a 0-indexed month array)
+    const fiscalMonths = [3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2];
 
     for (const sheetName of workbook.SheetNames) {
         try {
-            // If in Budget Mode, we might want to prioritize specific sheets or just apply the logic to all
-            // The user mentioned "シンコー合併" as the main one.
-            const normalizedSheetName = sheetName.normalize('NFKC').trim();
-            
+            const deptName = normalizeDeptName(sheetName);
             const sheet = workbook.Sheets[sheetName];
             const jsonData = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1 });
-            if (!jsonData || jsonData.length === 0) continue;
+            
+            if (!jsonData || jsonData.length < 3) continue;
 
-            const deptName = normalizeDeptName(sheetName);
-            console.log(`[Parser] 📂 Sheet: ${sheetName} -> Dept: ${deptName} (BudgetMode: ${isBudgetMode})`);
+            console.log(`[Parser] Processing Sheet: "${sheetName}" -> Normalized Dept: "${deptName}"`);
 
+            // Find Header Row (Search first 10 rows for something containing April)
             let headerRowIndex = -1;
-            let fileType: 'STANDARD' | 'BUDGET_MATRIX' | 'TRANSPOSED' = 'STANDARD';
-            let monthCols: Record<number, { actual: number; budget: number; prevYear: number }> = {};
-            let prevYearCol = -1;
-            let subjectIdx = -1;
-            let codeIdx = -1;
-            let colIndices: any = null;
+            let monthColMapping: { colIdx: number, monthIdx: number }[] = [];
 
-            // Search for header row
-            for (let i = 0; i < Math.min(jsonData.length, 60); i++) {
-                const row = jsonData[i];
-                if (!row || row.length < 2) continue;
-
-                const rowStr = Array.from(row).map(c => String(c || "").normalize('NFKC').toLowerCase().trim());
-                
-                const findIdx = (vList: string[]) => 
-                    rowStr.findIndex(c => c && vList.some(v => c === v || c.includes(v)));
-
-                // Specialized detection for the budget matrix based on screenshot
-                // Months are often spread across columns
-                const monthsInRow = rowStr.map((c, idx) => ({ val: c, idx })).filter(item => {
-                    const val = String(item.val);
-                    
-                    const isPureNumberMonth = /^\s*(4|5|6|7|8|9|10|11|12|1|2|3)\s*$/.test(val);
-                    const containsJPMonth = monthNamesJP.some(m => val === m) || [4,5,6,7,8,9,10,11,12,1,2,3].some(n => val.includes(String(n) + "月"));
-                    
-                    const hasMonthInfo = containsJPMonth || isPureNumberMonth;
-                    
-                    // If it contains "合計", etc., but DOES NOT have a month number, skip it
-                    if (!hasMonthInfo && (val.includes('小計') || val.includes('合計') || val.includes('累計') || val.includes('差異'))) {
-                        return false;
-                    }
-                    
-                    return hasMonthInfo;
-                });
-
-                if (monthsInRow.length >= 4) {
-                    headerRowIndex = i;
-                    fileType = 'BUDGET_MATRIX';
-                    
-                    // Identify subject and code columns by scanning rows below the header
-                    const firstMonthIdx = monthsInRow[0].idx;
-                    for (let col = 0; col < firstMonthIdx; col++) {
-                        let codeMatches = 0;
-                        let subjectMatches = 0;
-                        for (let rProbe = i + 1; rProbe < Math.min(jsonData.length, i + 20); rProbe++) {
-                            const val = String(jsonData[rProbe]?.[col] || "").trim();
-                            if (/^\d{4,6}$/.test(val)) codeMatches++;
-                            if (val && !/^\d+$/.test(val) && val.length > 2) subjectMatches++;
-                        }
-                        if (codeMatches >= 3) codeIdx = col;
-                        if (subjectMatches >= 3 && col !== codeIdx) subjectIdx = col;
-                    }
-
-                    // Check the following row for '実績' vs '予算' labels to handle dual-matrix formats
-                    const nextRow = jsonData[i + 1] || [];
-                    
-                    monthsInRow.forEach(m => {
-                        const val = String(m.val);
-                        let mNum = -1;
-                        const slashMatch = val.match(/\/(\d{1,2})/);
-                        const yearMatch = val.match(/年(\d{1,2})/);
-                        const monthMatch = val.match(/(\d{1,2})月/);
-                        
-                        if (slashMatch) mNum = parseInt(slashMatch[1]);
-                        else if (yearMatch) mNum = parseInt(yearMatch[1]);
-                        else if (monthMatch) mNum = parseInt(monthMatch[1]);
-                        else {
-                            const simpleMatch = val.match(/(\d{1,2})/);
-                            if (simpleMatch) {
-                                const n = parseInt(simpleMatch[1]);
-                                if (n >= 1 && n <= 12) mNum = n;
-                            }
-                        }
-
-                        if (mNum >= 1 && mNum <= 12) {
-                            const mIdx = mNum - 1;
-                            if (!monthCols[mIdx]) monthCols[mIdx] = { actual: -1, budget: -1, prevYear: -1 };
-                            
-                            // Check label below this specific column
-                            const labelBelow = String(nextRow[m.idx] || "").trim();
-                            if (labelBelow.includes('実績') || labelBelow.includes('Actual')) {
-                                monthCols[mIdx].actual = m.idx;
-                            } else if (labelBelow.includes('予算') || labelBelow.includes('Budget')) {
-                                monthCols[mIdx].budget = m.idx;
-                            } else {
-                                // Default: if it's the only one found yet, use it as budget
-                                if (monthCols[mIdx].budget === -1) monthCols[mIdx].budget = m.idx;
-                            }
-                        }
-                    });
-
-                    // Search for a 'Previous Year' column
-                    const prevYearIdx = rowStr.findIndex(c => 
-                        (String(c).includes('前年') || String(c).includes('前期')) && 
-                        (String(c).includes('実績') || String(c).includes('額'))
-                    );
-                    if (prevYearIdx !== -1) {
-                        (monthCols as any)._allPrevYear = prevYearIdx;
-                    }
-
-                    console.log(`[Parser] 💡 Specialized Budget Matrix detected at row ${i}`);
-                    break;
-                }
-
-                // Standard detection stays as fallback
-                codeIdx = findIdx(['コード', 'code', 'cd', 'id', 'no']);
-                subjectIdx = findIdx(['科目', '科目名', '項目', '勘定', 'subject', 'account']);
-                
-                if (subjectIdx !== -1) {
-                    // ... (rest of standard detection)
-                    const hasActBudLabels = rowStr.some(c => c.includes('実績')) && rowStr.some(c => c.includes('予算'));
-                    if (hasActBudLabels) {
-                        fileType = 'STANDARD';
-                        headerRowIndex = i;
-                        monthNamesJP.forEach((mStr, mIdx) => {
-                            const act = rowStr.findIndex(c => c.includes(mStr) && (c.includes('実績') || c.includes('actual')));
-                            const bud = rowStr.findIndex(c => c.includes(mStr) && (c.includes('予算') || c.includes('budget')));
-                            const prv = rowStr.findIndex(c => c.includes(mStr) && (c.includes('前年') || c.includes('前期')));
-                            if (act !== -1 || bud !== -1 || prv !== -1) {
-                                monthCols[mIdx] = { actual: act, budget: bud, prevYear: prv };
-                            }
-                        });
-                        break;
-                    }
-                }
-            }
-
-            if (headerRowIndex === -1) continue;
-
-            // --- DATA EXTRACTION ---
-            for (let r = headerRowIndex + 1; r < jsonData.length; r++) {
+            for (let r = 0; r < Math.min(jsonData.length, 10); r++) {
                 const row = jsonData[r];
                 if (!row) continue;
-
-                const subject = String(row[subjectIdx] || "").trim();
-                const code = codeIdx !== -1 ? String(row[codeIdx] || "").trim() : "";
                 
-                if (!subject || subject === "科目" || subject.includes("合計") || subject.includes("小計")) continue;
+                let currentFiscalMonthIdx = 0;
+                let potentialMapping: { colIdx: number, monthIdx: number }[] = [];
+                
+                for (let col = 2; col < row.length; col++) {
+                    const val = String(row[col] || "").trim().normalize('NFKC');
+                    
+                    // 完全スキップ: 小計、合計、累計、比、上期、下期、年間、半期 などのサマリー列
+                    if (val.includes("小計") || val.includes("合計") || val.includes("累計") || val.includes("比") || val.includes("上期") || val.includes("下期") || val.includes("年間") || val.includes("期") || val.includes("見込")) {
+                        continue;
+                    }
+                    
+                    // "4", "4月", "04月" などの「月」、あるいはエクセルの日付シリアル値(例えば45017など)を許容する
+                    // 数字で始まるもの全般を許可しつつ、上で小計系は弾いているので純粋な月列だけが残る
+                    if (/^(\d{1,5}).*$/.test(val) || val.includes("月")) {
+                        if (currentFiscalMonthIdx < 12) {
+                            potentialMapping.push({
+                                colIdx: col,
+                                monthIdx: fiscalMonths[currentFiscalMonthIdx]
+                            });
+                            currentFiscalMonthIdx++;
+                        }
+                    }
+                }
+                
+                if (potentialMapping.length >= 10) { // Found most of the months
+                    headerRowIndex = r;
+                    monthColMapping = potentialMapping;
+                    break;
+                }
+            }
 
-                Object.entries(monthCols).forEach(([mStr, cols]) => {
-                    const mIdx = parseInt(mStr);
-                    if (isNaN(mIdx)) return; // Skip _allPrevYear or other flags
+            if (headerRowIndex === -1) {
+                console.log(`[Parser] Skipping sheet "${sheetName}": Could not detect 12-month header.`);
+                continue;
+            }
 
-                    const budget = cols.budget !== -1 ? parseNumber(row[cols.budget]) : 0;
-                    const actual = cols.actual !== -1 ? parseNumber(row[cols.actual]) : 0;
-                    const prev = cols.prevYear !== -1 ? parseNumber(row[cols.prevYear]) : 0;
+            console.log(`[Parser] Header found at row ${headerRowIndex + 1}. Mapping ${monthColMapping.length} months.`);
 
-                    if (budget !== 0 || actual !== 0 || prev !== 0) {
+            // Data extraction starts from index below header
+            for (let r = headerRowIndex + 1; r < jsonData.length; r++) {
+                const row = jsonData[r];
+                if (!row || row.length < 2) continue;
+
+                const code = String(row[0] || "").trim(); // Column A
+                const subject = String(row[1] || "").trim(); // Column B
+
+                // Skip if both are empty or it's a total row
+                if (!subject || subject === "科目" || subject === "科目名") continue;
+                if (subject.includes("合計") || subject.includes("小計") || subject.includes("損益勘定") || subject.includes("計算")) continue;
+
+                monthColMapping.forEach(mapping => {
+                    const rawVal = row[mapping.colIdx];
+                    const val = parseNumber(rawVal);
+                    
+                    // Add record if it has a code OR is a legitimate calculation row with value
+                    // Even 0s are important for budget initialization
+                    if (code !== "" || val !== 0 || (subject !== "" && !subject.startsWith(" "))) {
                         allRecords.push({
                             code,
-                            subject: subject.replace(/^\d+[\s・./]/, '').trim(),
+                            subject,
                             department: deptName,
-                            actual,
-                            budget,
-                            prevYearActual: prev,
-                            monthIndex: mIdx
+                            actual: isBudgetMode ? 0 : val,
+                            budget: isBudgetMode ? val : 0,
+                            prevYearActual: 0,
+                            monthIndex: mapping.monthIdx
                         });
                     }
                 });
             }
-        } catch (err) { console.error(`[Parser] Sheet error:`, err); }
+        } catch (err) {
+            console.error(`[Parser] Error on sheet "${sheetName}":`, err);
+        }
     }
 
-    if (allRecords.length === 0) throw new Error("No data found.");
+    if (allRecords.length === 0) {
+        throw new Error("データが見つかりませんでした。以下の点を確認してください：\n1. 「予算入力モード」がオンになっていますか？\n2. シート内に12ヶ月分（4月〜3月）のデータ列がありますか？\n3. 3行目前後に月次見出しがありますか？");
+    }
+
+    console.log(`[Parser] Successfully extracted ${allRecords.length} records.`);
     return allRecords;
 };

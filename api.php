@@ -31,18 +31,99 @@ try {
 }
 
 // -------------------------------------------------------------
-// 【2】 POSTデータの取得
+// 【2】 POSTデータの取得とActionの特定
 // -------------------------------------------------------------
-$action = $_GET['action'] ?? '';
 $json = file_get_contents('php://input');
 $data = json_decode($json, true);
-
 if (!$data) $data = $_POST;
+
+// Action を URLパラメータ、またはJSONボディから取得
+$action = $_GET['action'] ?? $data['action'] ?? '';
 
 // -------------------------------------------------------------
 // 【3】 アクション別の処理
 // -------------------------------------------------------------
+    // テーブル自動作成
+    $pdo->exec("CREATE TABLE IF NOT EXISTS financial_data (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        company_name VARCHAR(255),
+        fiscal_year INT,
+        month_index INT,
+        department VARCHAR(255),
+        subject_code VARCHAR(50),
+        subject_name VARCHAR(255),
+        budget DECIMAL(15, 2) DEFAULT 0,
+        actual DECIMAL(15, 2) DEFAULT 0,
+        calc_result DECIMAL(15, 2) DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uni_idx (company_name, fiscal_year, month_index, department, subject_code, subject_name)
+    )");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS account_master (
+        code VARCHAR(50) PRIMARY KEY,
+        name VARCHAR(255),
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )");
+
 switch ($action) {
+    case 'save_financial_data':
+        $company = $data['company'] ?? '';
+        $year = $data['year'] ?? 0;
+        $records = $data['records'] ?? [];
+        $type = $data['dataType'] ?? 'actual'; // 'actual' or 'budget'
+
+        if (!$company || !$year || empty($records)) {
+            echo json_encode(['success' => false, 'message' => 'Invalid parameters']);
+            exit;
+        }
+
+        $stmt = $pdo->prepare("INSERT INTO financial_data 
+            (company_name, fiscal_year, month_index, department, subject_code, subject_name, $type, calc_result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE 
+            $type = VALUES($type),
+            calc_result = actual - budget");
+
+        $stmtMaster = $pdo->prepare("INSERT INTO account_master (code, name) VALUES (?, ?) 
+                                     ON DUPLICATE KEY UPDATE name = VALUES(name)");
+
+        try {
+            $pdo->beginTransaction();
+            foreach ($records as $r) {
+                $val = $r['value'] ?? 0;
+                $code = $r['code'] ?? '';
+                $subject = $r['subject'] ?? '';
+
+                // 財務データの保存
+                $stmt->execute([
+                    $company, $year, $r['month'], $r['department'], 
+                    $code, $subject, $val, 0 // calc_resultはUPDATE側で計算
+                ]);
+
+                // 科目マスタの更新 (コードがある場合のみ)
+                if ($code !== "") {
+                    $stmtMaster->execute([$code, $subject]);
+                }
+            }
+            $pdo->commit();
+            echo json_encode(['success' => true]);
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        }
+        break;
+
+    case 'get_financial_data':
+        $company = $data['company'] ?? '';
+        $year = $data['year'] ?? 0;
+        
+        $stmt = $pdo->prepare("SELECT * FROM financial_data WHERE company_name = ? AND fiscal_year = ?");
+        $stmt->execute([$company, $year]);
+        $rows = $stmt->fetchAll();
+        
+        echo json_encode(['success' => true, 'data' => $rows]);
+        break;
+
     case 'check_user':
         // 社員番号と氏名で登録状況を確認
         $empId = $data['employeeId'] ?? '';
@@ -137,7 +218,7 @@ switch ($action) {
         break;
 
     default:
-        echo json_encode(['success' => false, 'message' => 'Invalid action']);
+        echo json_encode(['success' => false, 'message' => "Invalid action: '{$action}'"]);
         break;
 }
 

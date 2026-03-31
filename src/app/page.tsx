@@ -38,8 +38,8 @@ interface AppMetadata {
 
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<any>(null);
-
   const [dataByMonth, setDataByMonth] = useState<Record<number, MonthlyRecord[]>>({});
+  const [prevDataByMonth, setPrevDataByMonth] = useState<Record<number, MonthlyRecord[]>>({});
   const [selectedDept, setSelectedDept] = useState<string>("All");
 
   // Storage focus states
@@ -133,31 +133,88 @@ export default function Home() {
     console.log(`✅ [Recovery] Scan finished. Profiles found: ${meta.savedProfiles.length}`);
   }, []);
 
-  const loadProfileData = (company: string, year: string) => {
-    if (!company || !year) return;
-    const storageKey = `${STORAGE_KEY_PREFIX}${company}_${year}`;
-    const dataStr = localStorage.getItem(storageKey);
-    if (dataStr) {
+  const normalizeLegacyDeptName = (name: string): string => {
+    let clean = name.normalize('NFKC').trim();
+    clean = clean.replace(/[()（）]/g, '').trim();
+    const match = clean.match(/^(\d+)?\s*(.*)$/);
+    if (match && match[2]) {
+        return match[2].trim();
+    }
+    return clean;
+  };
+
+  const fetchSQLOrLocal = async (comp: string, y: string): Promise<Record<number, MonthlyRecord[]>> => {
+    try {
+      const res = await fetch(`https://kz801xs.xsrv.jp/budget_v6/api.php?action=get_financial_data`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company: comp, year: parseInt(y) })
+      });
+      const result = await res.json();
+      
+      if (result.success && Array.isArray(result.data) && result.data.length > 0) {
+        const newData: Record<number, MonthlyRecord[]> = {};
+        result.data.forEach((row: any) => {
+          const mIdx = parseInt(row.month_index);
+          if (!newData[mIdx]) newData[mIdx] = [];
+          
+          newData[mIdx].push({
+            code: row.subject_code,
+            subject: row.subject_name,
+            department: row.department,
+            actual: parseFloat(row.actual || 0),
+            budget: parseFloat(row.budget || 0),
+            prevYearActual: 0,
+            monthIndex: mIdx
+          });
+        });
+        console.log(`[Data Fetch] Loaded ${y} for ${comp} from SQL.`);
+        return newData;
+      }
+    } catch (e) {
+      console.warn(`[Data Fetch] Failed to fetch SQL for ${comp} ${y}`, e);
+    }
+    
+    // Fallback to localStorage
+    const storageKey = `${STORAGE_KEY_PREFIX}${comp}_${y}`;
+    const raw = localStorage.getItem(storageKey);
+    if (raw) {
       try {
-        const storageData: StorageData = JSON.parse(dataStr);
-        if (storageData && storageData.dataByMonth) {
-          setDataByMonth(storageData.dataByMonth);
-          setAppMode(storageData.appMode || 'standard');
-        } else {
-          console.warn(`No dataByMonth found in ${storageKey}`);
-          setDataByMonth({});
-          setAppMode('standard');
+        const parsed = JSON.parse(raw);
+        if (parsed.dataByMonth) {
+          const normalizedData: Record<number, MonthlyRecord[]> = {};
+          Object.entries(parsed.dataByMonth as Record<number, MonthlyRecord[]>).forEach(([mIdx, records]) => {
+             normalizedData[parseInt(mIdx)] = records.map(r => ({
+               ...r,
+               department: normalizeLegacyDeptName(r.department)
+             }));
+          });
+          console.log(`[Data Fetch] Loaded ${y} for ${comp} from LocalStorage (Fallback).`);
+          return normalizedData;
         }
       } catch (e) {
-        console.error(`Failed to parse storage data for ${storageKey}`, e);
-        setDataByMonth({});
-        setAppMode('standard');
+        console.error("Error parsing local storage fallback data", e);
       }
-    } else {
-      console.log(`No data found in storage for key: ${storageKey}`);
-      setDataByMonth({});
-      setAppMode('standard');
     }
+
+    console.log(`[Data Fetch] No data found for ${comp} ${y}.`);
+    return {};
+  };
+
+  const loadProfileData = async (company: string, year: string) => {
+    if (!company || !year) return;
+    setIsLoadingStorage(true);
+    
+    // Fetch Current Year (SQL -> LocalStorage fallback)
+    const currentData = await fetchSQLOrLocal(company, year);
+    setDataByMonth(currentData);
+
+    // Fetch Previous Year (SQL -> LocalStorage fallback)
+    const prevYearStr = (parseInt(year) - 1).toString();
+    const prevData = await fetchSQLOrLocal(company, prevYearStr);
+    setPrevDataByMonth(prevData);
+
+    setIsLoadingStorage(false);
   };
 
   const saveProfileData = (company: string, year: string, data: Record<number, MonthlyRecord[]>, mode: AppMode = appMode) => {
@@ -172,8 +229,12 @@ export default function Home() {
       appMode: mode
     };
 
-    // Save data
-    localStorage.setItem(storageKey, JSON.stringify(storageData));
+    // Save data (ignore quota exceeded errors since main truth is SQL)
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(storageData));
+    } catch (e) {
+      console.warn("[Storage] LocalStorage quota exceeded. Data is still safely in SQL.");
+    }
 
     // Update metadata
     const exists = savedProfiles.some(p => p.company === company && p.year === year);
@@ -225,6 +286,7 @@ export default function Home() {
 
     if (companyName === company && fiscalYear === year) {
       setDataByMonth({});
+      setPrevDataByMonth({});
     }
   };
 
@@ -236,97 +298,87 @@ export default function Home() {
       return;
     }
 
-    // 1. First, update local state
-    setDataByMonth(prev => {
-      let next = { ...prev };
-      
-      const mergeRecords = (monthIdx: number, newRecords: MonthlyRecord[]) => {
-        const existing = next[monthIdx] || [];
-        const merged: MonthlyRecord[] = [...existing];
-        
-        newRecords.forEach(nr => {
-          const matchIdx = merged.findIndex(er => 
-            er.department === nr.department && 
-            (er.code === nr.code && er.code !== "" ? true : er.subject === nr.subject)
-          );
-          
-          if (matchIdx !== -1) {
-            const updated = { ...merged[matchIdx] };
-            if (nr.actual !== 0) updated.actual = nr.actual;
-            if (nr.budget !== 0) updated.budget = nr.budget;
-            if (nr.prevYearActual !== 0) updated.prevYearActual = nr.prevYearActual;
-            merged[matchIdx] = updated;
-          } else {
-            merged.push(nr);
-          }
-        });
-        return merged;
-      };
-
-      if (typeof dataUpdate === 'number') {
-        next[dataUpdate] = mergeRecords(dataUpdate, records || []);
-      } else {
-        Object.entries(dataUpdate).forEach(([mStr, mRecords]) => {
-          const mIdx = parseInt(mStr);
-          next[mIdx] = mergeRecords(mIdx, mRecords);
-        });
-      }
-      
-      saveProfileData(companyName, fiscalYear, next);
-      return next;
-    });
-
-    // 2. Extract unique code/subject pairs for Master Sync
-    const allNewRecords = typeof dataUpdate === 'number' ? (records || []) : Object.values(dataUpdate).flat();
-    const uniquePairs: { code: string; subject: string }[] = [];
-    const seenCodes = new Set<string>();
+    // 1. アップロードされたデータが「予算」か「実績」かを判定
+    const allRecords: MonthlyRecord[] = typeof dataUpdate === 'number' ? (records || []) : Object.values(dataUpdate).flat();
     
-    allNewRecords.forEach(r => {
-      if (r.code && !seenCodes.has(r.code)) {
-        uniquePairs.push({ code: r.code, subject: r.subject });
-        seenCodes.add(r.code);
-      }
-    });
+    const hasBudget = allRecords.some(r => r.budget !== 0);
+    const hasActual = allRecords.some(r => r.actual !== 0);
+    const dataType = hasActual ? 'actual' : 'budget';
 
-    if (uniquePairs.length > 0) {
-      try {
-        const res = await fetch(`https://kz801xs.xsrv.jp/budget_v6/api.php?action=sync_master_accounts`, {
+    // 2. SQLサーバーへ保存送信 (チャンクに分けて送信)
+    const CHUNK_SIZE = 1000;
+    const recordsToSave = allRecords.map(r => ({
+      month: r.monthIndex,
+      department: r.department,
+      code: r.code,
+      subject: r.subject,
+      value: dataType === 'actual' ? r.actual : r.budget
+    }));
+
+    try {
+      // 過去に BudgetMode: false で誤って「予算」を「実績」としてアップロードしてしまった場合、
+      // SQLの actual カラムに予算の数字が入ったまま残ってしまいます。
+      // これを打ち消すため、予算アップロード時は、対象の actual を一律 0 で上書きクリアします。
+      if (dataType === 'budget') {
+        console.log(`[SQL Save] Pre-clearing false actuals for budget mode...`);
+        const clearRecords = recordsToSave.map(r => ({ ...r, value: 0 }));
+        for (let i = 0; i < clearRecords.length; i += CHUNK_SIZE) {
+          await fetch(`https://kz801xs.xsrv.jp/budget_v6/api.php?action=save_financial_data`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              company: companyName,
+              year: parseInt(fiscalYear),
+              dataType: 'actual', // Target the actual column to clear it
+              records: clearRecords.slice(i, i + CHUNK_SIZE)
+            })
+          });
+        }
+      }
+
+      console.log(`[SQL Save] Starting save for ${recordsToSave.length} records in chunks of ${CHUNK_SIZE}...`);
+      
+      for (let i = 0; i < recordsToSave.length; i += CHUNK_SIZE) {
+        const chunk = recordsToSave.slice(i, i + CHUNK_SIZE);
+        
+        const res = await fetch(`https://kz801xs.xsrv.jp/budget_v6/api.php?action=save_financial_data`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ accounts: uniquePairs })
+          body: JSON.stringify({
+            company: companyName,
+            year: parseInt(fiscalYear),
+            dataType: dataType,
+            records: chunk
+          })
         });
+        
         const result = await res.json();
-        if (result.success && result.master) {
-          const mapping: Record<string, string> = {};
-          result.master.forEach((m: any) => mapping[m.code] = m.subject);
-          setMasterAccounts(mapping);
+        if (!result.success) {
+          throw new Error(result.message || "Unknown error during chunk save");
         }
-      } catch (e) {
-        console.warn("Failed to sync master accounts:", e);
+        
+        console.log(`[SQL Save] Progress: ${Math.min(i + CHUNK_SIZE, recordsToSave.length)} / ${recordsToSave.length}`);
       }
+      
+      console.log(`✅ ${dataType} data saved to SQL successfully (${recordsToSave.length} total records).`);
+      
+      // Update LocalStorage as a backup/cache (so user doesn't panic if SQL isn't completely setup)
+      const currentData = await fetchSQLOrLocal(companyName, fiscalYear);
+      saveProfileData(companyName, fiscalYear, currentData, appMode);
+      
+      // 再読み込みして表示を更新
+      loadProfileData(companyName, fiscalYear);
+      
+    } catch (e: any) {
+      console.error("Failed to save data to SQL:", e);
+      alert("データ保存に失敗しました: " + e.message);
     }
   };
 
   const aggregatedData: PnLData = useMemo(() => {
-    // Attempt to fetch previous year's actuals for comparison
-    let prevYearData: Record<number, MonthlyRecord[]> | undefined;
-    if (companyName && fiscalYear && !isNaN(parseInt(fiscalYear))) {
-      const prevYear = parseInt(fiscalYear) - 1;
-      const prevKey = `${STORAGE_KEY_PREFIX}${companyName}_${prevYear}`;
-      const prevRaw = localStorage.getItem(prevKey);
-      if (prevRaw) {
-        try {
-          const parsed = JSON.parse(prevRaw);
-          prevYearData = parsed.dataByMonth;
-          console.log(`[Aggregator] 📈 Loaded ${prevYear} actuals for comparison with ${fiscalYear}`);
-        } catch (e) {
-          console.warn(`Failed to load previous year data for ${companyName}_${prevYear}`, e);
-        }
-      }
-    }
+    return aggregateData(dataByMonth, appMode, prevDataByMonth, masterAccounts);
+  }, [dataByMonth, appMode, prevDataByMonth, masterAccounts]);
 
-    return aggregateData(dataByMonth, appMode, prevYearData, masterAccounts);
-  }, [dataByMonth, appMode, companyName, fiscalYear, masterAccounts]);
 
   const financialReport = useMemo(() => {
     // Filter rows based on selected department
