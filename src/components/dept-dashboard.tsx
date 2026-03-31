@@ -29,10 +29,11 @@ export function DeptDashboard({ data, selectedDepartment, companyName, fiscalYea
     const [editingDept, setEditingDept] = useState<string | null>(null);
     const [tempHeadcount, setTempHeadcount] = useState<DeptHeadcount>({ sales: 0, warehouse: 0, operations: 0, accounting: 0 });
 
-    // Load employee counts on mount
+    // Load employee counts on mount (async SQL)
     useEffect(() => {
-        const counts = getAllEmployeeCounts(companyName, fiscalYear);
-        setEmployeeCounts(counts);
+        getAllEmployeeCounts(companyName, fiscalYear).then(counts => {
+            setEmployeeCounts(counts);
+        });
     }, [companyName, fiscalYear]);
 
     // Filter departments (exclude core sheets and specific departments)
@@ -84,9 +85,9 @@ export function DeptDashboard({ data, selectedDepartment, companyName, fiscalYea
         }
     }, [selectedDepartment, departments, onDepartmentChange]);
 
-    // Handle employee count update
-    const handleEmployeeCountSave = (dept: string) => {
-        setEmployeeCount(companyName, fiscalYear, dept, tempHeadcount);
+    // Handle employee count update (async SQL)
+    const handleEmployeeCountSave = async (dept: string) => {
+        await setEmployeeCount(companyName, fiscalYear, dept, tempHeadcount);
         setEmployeeCounts(prev => ({ ...prev, [dept]: tempHeadcount }));
         setEditingDept(null);
     };

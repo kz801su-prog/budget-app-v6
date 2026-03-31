@@ -1,376 +1,191 @@
-import { StorageData, DeptHeadcount } from './types';
+import { DeptHeadcount } from './types';
+import { callApi } from './api';
 
-const STORAGE_KEY_PREFIX = 'budget_app_data_';
-
-/**
- * Employee count management
- */
-const EMPLOYEE_COUNT_KEY = 'budget_app_employee_counts';
+// ─────────────────────────────────────────────────────────────
+// 従業員数 (SQL ベース)
+// ─────────────────────────────────────────────────────────────
 
 export interface DepartmentEmployeeCounts {
-    [companyYear: string]: { // "CompanyName_Year"
+    [companyYear: string]: {
         [department: string]: DeptHeadcount;
     };
 }
 
 const DEFAULT_HEADCOUNT: DeptHeadcount = {
-    sales: 0,
-    warehouse: 0,
-    operations: 0,
-    accounting: 0
+    sales: 0, warehouse: 0, operations: 0, accounting: 0,
 };
 
-export function getEmployeeCount(company: string, year: string, department: string): DeptHeadcount {
-    if (typeof window === 'undefined') return DEFAULT_HEADCOUNT;
-
-    const key = `${company}_${year}`;
-    const dataStr = localStorage.getItem(EMPLOYEE_COUNT_KEY);
-
-    if (dataStr) {
-        try {
-            const data: DepartmentEmployeeCounts = JSON.parse(dataStr);
-            const raw = data[key]?.[department];
-            if (typeof raw === 'number') {
-                // Migration for old data
-                return { ...DEFAULT_HEADCOUNT, sales: raw };
-            }
-            return raw || DEFAULT_HEADCOUNT;
-        } catch (e) {
-            console.error('Failed to parse employee counts', e);
-        }
+export async function getAllEmployeeCounts(
+    company: string, year: string,
+): Promise<Record<string, DeptHeadcount>> {
+    try {
+        const res = await callApi('get_employee_counts', { company, year: parseInt(year) });
+        if (res.success) return res.counts as Record<string, DeptHeadcount>;
+    } catch (e) {
+        console.warn('[EmployeeCounts] SQL fetch failed', e);
     }
-
-    return DEFAULT_HEADCOUNT;
-}
-
-export function setEmployeeCount(company: string, year: string, department: string, count: DeptHeadcount) {
-    if (typeof window === 'undefined') return;
-
-    const key = `${company}_${year}`;
-    let data: DepartmentEmployeeCounts = {};
-
-    const dataStr = localStorage.getItem(EMPLOYEE_COUNT_KEY);
-    if (dataStr) {
-        try {
-            data = JSON.parse(dataStr);
-        } catch (e) {
-            console.error('Failed to parse employee counts', e);
-        }
-    }
-
-    if (!data[key]) {
-        data[key] = {};
-    }
-
-    data[key][department] = count;
-    localStorage.setItem(EMPLOYEE_COUNT_KEY, JSON.stringify(data));
-}
-
-export function getAllEmployeeCounts(company: string, year: string): Record<string, DeptHeadcount> {
-    if (typeof window === 'undefined') return {};
-
-    const key = `${company}_${year}`;
-    const dataStr = localStorage.getItem(EMPLOYEE_COUNT_KEY);
-
-    if (dataStr) {
-        try {
-            const data: DepartmentEmployeeCounts = JSON.parse(dataStr);
-            const counts = data[key] || {};
-            // Handle migration for all entries in the object
-            const result: Record<string, DeptHeadcount> = {};
-            Object.keys(counts).forEach(dept => {
-                const raw = counts[dept];
-                if (typeof raw === 'number') {
-                    result[dept] = { ...DEFAULT_HEADCOUNT, sales: raw };
-                } else {
-                    result[dept] = raw || DEFAULT_HEADCOUNT;
-                }
-            });
-            return result;
-        } catch (e) {
-            console.error('Failed to parse employee counts', e);
-        }
-    }
-
     return {};
 }
-const METADATA_KEY = 'budget_app_metadata';
-const LAST_BACKUP_KEY = 'budget_app_last_backup';
+
+export async function getEmployeeCount(
+    company: string, year: string, department: string,
+): Promise<DeptHeadcount> {
+    const all = await getAllEmployeeCounts(company, year);
+    return all[department] ?? { ...DEFAULT_HEADCOUNT };
+}
+
+export async function setEmployeeCount(
+    company: string, year: string, department: string, count: DeptHeadcount,
+): Promise<void> {
+    await callApi('save_employee_count', {
+        company, year: parseInt(year), department, count,
+    });
+}
+
+// ─────────────────────────────────────────────────────────────
+// バックアップ
+// ─────────────────────────────────────────────────────────────
 
 export interface BackupData {
     version: string;
     exportDate: string;
-    profiles: StorageData[];
-    metadata: any;
+    profiles: any[];
     employeeCounts?: any;
 }
 
-/**
- * Export all data from localStorage to JSON
- */
-export function exportAllData(): BackupData {
-    if (typeof window === 'undefined') {
-        return { version: '1.0', exportDate: new Date().toISOString(), profiles: [], metadata: null };
+/** SQL から全データを取得して BackupData 形式で返す */
+export async function exportAllData(): Promise<BackupData> {
+    try {
+        const res = await callApi('export_all_data');
+        if (res.success) {
+            return {
+                version: res.version ?? '2.0',
+                exportDate: res.exportDate ?? new Date().toISOString(),
+                profiles: res.profiles ?? [],
+                employeeCounts: res.employeeCounts ?? {},
+            };
+        }
+    } catch (e) {
+        console.error('[Backup] export_all_data failed', e);
     }
+    return { version: '2.0', exportDate: new Date().toISOString(), profiles: [] };
+}
 
-    const profiles: StorageData[] = [];
+/** BackupData を SQL にインポートする */
+export async function importBackupData(
+    backupData: BackupData,
+    overwrite: boolean = false,
+): Promise<{ success: boolean; imported: number; skipped: number; errors: string[] }> {
+    const result = { success: true, imported: 0, skipped: 0, errors: [] as string[] };
+    const CHUNK = 1000;
 
-    // Get all storage keys
-    const keys = Object.keys(localStorage);
-    // Find keys like budget_app_data_Company_Year
-    const dataKeys = keys.filter(k => k.startsWith(STORAGE_KEY_PREFIX));
+    for (const profile of backupData.profiles) {
+        const company = profile.companyName ?? profile.company ?? '';
+        const year    = String(profile.fiscalYear ?? profile.year ?? '');
+        const mode    = profile.appMode ?? 'standard';
+        const dbm     = profile.dataByMonth ?? {};
 
-    dataKeys.forEach(key => {
-        const dataStr = localStorage.getItem(key);
-        if (dataStr) {
-            try {
-                // Ensure we don't double-parse if it's already an object or handle double-stringified data
-                let data = JSON.parse(dataStr);
-                if (typeof data === 'string') data = JSON.parse(data);
+        if (!company || !year) continue;
 
-                if (data && data.companyName) {
-                    profiles.push(data);
-                }
-            } catch (e) {
-                console.error(`Failed to parse ${key}`, e);
+        // overwrite=false の場合はスキップ（check は省略、SQL の UPSERT に任せる）
+        try {
+            const allRecords: any[] = [];
+            Object.entries(dbm).forEach(([mStr, records]: [string, any]) => {
+                const month = parseInt(mStr);
+                (Array.isArray(records) ? records : []).forEach((r: any) => {
+                    if (r.actual !== 0) allRecords.push({ month, department: r.department, code: r.code ?? '', subject: r.subject ?? '', value: r.actual ?? 0 });
+                });
+            });
+
+            const budgetRecords: any[] = [];
+            Object.entries(dbm).forEach(([mStr, records]: [string, any]) => {
+                const month = parseInt(mStr);
+                (Array.isArray(records) ? records : []).forEach((r: any) => {
+                    if ((r.budget ?? 0) !== 0) budgetRecords.push({ month, department: r.department, code: r.code ?? '', subject: r.subject ?? '', value: r.budget ?? 0 });
+                });
+            });
+
+            // Save actual
+            for (let i = 0; i < allRecords.length; i += CHUNK) {
+                await callApi('save_financial_data', {
+                    company, year: parseInt(year), dataType: 'actual',
+                    records: allRecords.slice(i, i + CHUNK),
+                });
             }
-        }
-    });
+            // Save budget
+            for (let i = 0; i < budgetRecords.length; i += CHUNK) {
+                await callApi('save_financial_data', {
+                    company, year: parseInt(year), dataType: 'budget',
+                    records: budgetRecords.slice(i, i + CHUNK),
+                });
+            }
 
-    // Get metadata
-    const metaStr = localStorage.getItem(METADATA_KEY);
-    let metadata = null;
-    if (metaStr) {
-        try {
-            metadata = JSON.parse(metaStr);
-            if (typeof metadata === 'string') metadata = JSON.parse(metadata);
-        } catch (e) {
-            console.error('Failed to parse metadata', e);
-        }
-    }
-
-    // Get employee counts
-    const countsStr = localStorage.getItem(EMPLOYEE_COUNT_KEY);
-    let employeeCounts = null;
-    if (countsStr) {
-        try {
-            employeeCounts = JSON.parse(countsStr);
-            if (typeof employeeCounts === 'string') employeeCounts = JSON.parse(employeeCounts);
-        } catch (e) {
-            console.error('Failed to parse employee counts', e);
-        }
-    }
-
-    return {
-        version: '1.0',
-        exportDate: new Date().toISOString(),
-        profiles: profiles,
-        metadata: metadata,
-        employeeCounts: employeeCounts
-    };
-}
-
-/**
- * Export specific company data
- */
-export function exportCompanyData(company: string, year: string): StorageData | null {
-    if (typeof window === 'undefined') return null; // SSR check
-
-    const storageKey = `${STORAGE_KEY_PREFIX}${company}_${year}`;
-    const dataStr = localStorage.getItem(storageKey);
-
-    if (dataStr) {
-        try {
-            return JSON.parse(dataStr);
-        } catch (e) {
-            console.error('Failed to parse company data', e);
-            return null;
-        }
-    }
-
-    return null;
-}
-
-/**
- * Import backup data into localStorage
- */
-export function importBackupData(backupData: BackupData, overwrite: boolean = false): {
-    success: boolean;
-    imported: number;
-    skipped: number;
-    errors: string[];
-} {
-    if (typeof window === 'undefined') {
-        return { success: false, imported: 0, skipped: 0, errors: ['localStorage not available'] };
-    }
-
-    const result = {
-        success: true,
-        imported: 0,
-        skipped: 0,
-        errors: [] as string[]
-    };
-
-    const importedProfiles: { company: string; year: string }[] = [];
-
-    // Import profiles
-    backupData.profiles.forEach(profile => {
-        const storageKey = `${STORAGE_KEY_PREFIX}${profile.companyName}_${profile.fiscalYear}`;
-        const exists = localStorage.getItem(storageKey) !== null;
-
-        if (exists && !overwrite) {
-            result.skipped++;
-            return;
-        }
-
-        try {
-            localStorage.setItem(storageKey, JSON.stringify(profile));
+            await callApi('save_profile', { company, year: parseInt(year), app_mode: mode });
             result.imported++;
-            importedProfiles.push({ company: profile.companyName, year: profile.fiscalYear });
         } catch (e: any) {
-            result.errors.push(`Failed to import ${profile.companyName} (${profile.fiscalYear}): ${e.message}`);
+            result.errors.push(`${company}(${year}): ${e.message}`);
             result.success = false;
         }
-    });
-
-    // Update metadata
-    try {
-        const metaStr = localStorage.getItem(METADATA_KEY);
-        let currentMeta: any = { savedProfiles: [] };
-
-        if (metaStr) {
-            try {
-                currentMeta = JSON.parse(metaStr);
-                if (!currentMeta.savedProfiles) currentMeta.savedProfiles = [];
-            } catch (e) {
-                // If metadata is corrupted, start fresh
-            }
-        }
-
-        // If backup has its own metadata, we can choose to merge or overwrite
-        // Let's merge savedProfiles from backup if present
-        if (backupData.metadata && backupData.metadata.savedProfiles) {
-            backupData.metadata.savedProfiles.forEach((p: any) => {
-                const exists = currentMeta.savedProfiles.some((cp: any) => cp.company === p.company && cp.year === p.year);
-                if (!exists) {
-                    currentMeta.savedProfiles.push(p);
-                }
-            });
-            // Also update lastUsedProfile if provided and none exists
-            if (backupData.metadata.lastUsedProfile && !currentMeta.lastUsedProfile) {
-                currentMeta.lastUsedProfile = backupData.metadata.lastUsedProfile;
-            }
-        }
-
-        // Ensure all actually imported profiles are in the metadata list
-        importedProfiles.forEach(p => {
-            const exists = currentMeta.savedProfiles.some((cp: any) => cp.company === p.company && cp.year === p.year);
-            if (!exists) {
-                currentMeta.savedProfiles.push(p);
-            }
-        });
-
-        localStorage.setItem(METADATA_KEY, JSON.stringify(currentMeta));
-    } catch (e: any) {
-        result.errors.push(`Failed to update metadata: ${e.message}`);
     }
 
-    // Update employee counts if present
+    // 従業員数のインポート
     if (backupData.employeeCounts) {
-        try {
-            localStorage.setItem(EMPLOYEE_COUNT_KEY, JSON.stringify(backupData.employeeCounts));
-        } catch (e: any) {
-            result.errors.push(`Failed to import employee counts: ${e.message}`);
+        for (const [key, depts] of Object.entries(backupData.employeeCounts as Record<string, any>)) {
+            const parts = key.split('_');
+            const yr    = parts.pop() ?? '';
+            const comp  = parts.join('_');
+            for (const [dept, count] of Object.entries(depts as Record<string, any>)) {
+                try {
+                    await callApi('save_employee_count', {
+                        company: comp, year: parseInt(yr), department: dept, count,
+                    });
+                } catch (e) { /* ignore */ }
+            }
         }
     }
 
     return result;
 }
 
-/**
- * Download backup file
- */
+/** JSON ファイルとしてダウンロードする */
 export function downloadBackup(data: BackupData, filename?: string) {
-    if (typeof window === 'undefined') return; // SSR check
-
+    if (typeof window === 'undefined') return;
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename || `budget_backup_${new Date().toISOString().split('T')[0]}.json`;
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename ?? `budget_backup_${new Date().toISOString().split('T')[0]}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-
-    // Update last backup time
-    localStorage.setItem(LAST_BACKUP_KEY, new Date().toISOString());
 }
 
-/**
- * Download specific company backup
- */
-export function downloadCompanyBackup(company: string, year: string) {
-    const data = exportCompanyData(company, year);
-    if (!data) {
-        throw new Error('Company data not found');
-    }
+/** 特定企業のバックアップをダウンロード */
+export async function downloadCompanyBackup(company: string, year: string) {
+    const res = await callApi('export_all_data');
+    if (!res.success) throw new Error('エクスポート失敗');
 
-    const countsStr = localStorage.getItem(EMPLOYEE_COUNT_KEY);
-    let employeeCounts = null;
-    if (countsStr) {
-        try {
-            employeeCounts = JSON.parse(countsStr);
-            if (typeof employeeCounts === 'string') employeeCounts = JSON.parse(employeeCounts);
-        } catch (e) {
-            console.error('Failed to parse employee counts', e);
-        }
-    }
+    const profile = (res.profiles as any[]).find(
+        (p: any) => p.companyName === company && String(p.fiscalYear) === year,
+    );
+    if (!profile) throw new Error('該当データが見つかりません');
 
-    const backupData: BackupData = {
-        version: '1.0',
-        exportDate: new Date().toISOString(),
-        profiles: [data],
-        metadata: null,
-        employeeCounts: employeeCounts
-    };
+    const empKey = `${company}_${year}`;
+    const empCounts = res.employeeCounts?.[empKey] ?? {};
 
-    downloadBackup(backupData, `${company}_${year}_backup.json`);
+    downloadBackup(
+        { version: '2.0', exportDate: new Date().toISOString(), profiles: [profile], employeeCounts: { [empKey]: empCounts } },
+        `${company}_${year}_backup.json`,
+    );
 }
 
-/**
- * Get last backup timestamp
- */
+/** バックアップ必要か（常に true を返す簡易版） */
+export function isBackupNeeded(): boolean {
+    return true;
+}
+
 export function getLastBackupTime(): Date | null {
-    if (typeof window === 'undefined') return null; // SSR check
-
-    const timestamp = localStorage.getItem(LAST_BACKUP_KEY);
-    if (timestamp) {
-        return new Date(timestamp);
-    }
     return null;
 }
-
-/**
- * Check if backup is needed (older than 7 days)
- */
-export function isBackupNeeded(): boolean {
-    const lastBackup = getLastBackupTime();
-    if (!lastBackup) return true;
-
-    const daysSinceBackup = (Date.now() - lastBackup.getTime()) / (1000 * 60 * 60 * 24);
-    return daysSinceBackup > 7;
-}
-
-/**
- * Auto-create backup when data changes
- */
-export function createAutoBackup(companyName: string, fiscalYear: string) {
-    const allData = exportAllData();
-    downloadBackup(allData, `auto_backup_${companyName}_${fiscalYear}_${Date.now()}.json`);
-}
-
-
-

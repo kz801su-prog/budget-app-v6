@@ -1,17 +1,16 @@
 "use client"
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import { FileUpload } from '@/components/file-upload';
 import { VarianceTable } from '@/components/variance-table';
 import { FinancialTable } from '@/components/financial-table';
-import { MonthlyRecord, PnLData, StorageData, AppMode } from '@/lib/types';
+import { MonthlyRecord, PnLData, AppMode } from '@/lib/types';
 import { aggregateData } from '@/lib/aggregator';
 import { analyzeFinancials } from '@/lib/financial-analyzer';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Download, RefreshCw, LayoutDashboard, PlusCircle, Trash2, Building2, CalendarDays } from 'lucide-react';
 import { Dashboard } from '@/components/dashboard';
@@ -24,17 +23,9 @@ import { DeptDashboard } from '@/components/dept-dashboard';
 import { DeptRatioTable } from '@/components/dept-ratio-table';
 import { BackupManager } from '@/components/backup-manager';
 import { cn } from '@/lib/utils';
-import { exportAllData, downloadBackup } from '@/lib/storage-utils';
-
+import { Input } from '@/components/ui/input';
+import { API_BASE, callApi } from '@/lib/api';
 import { LoginSystem } from '@/components/login-system';
-
-const STORAGE_KEY_PREFIX = 'budget_app_data_';
-const METADATA_KEY = 'budget_app_metadata';
-
-interface AppMetadata {
-  savedProfiles: { company: string; year: string }[];
-  lastUsedProfile?: { company: string; year: string };
-}
 
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -42,451 +33,325 @@ export default function Home() {
   const [prevDataByMonth, setPrevDataByMonth] = useState<Record<number, MonthlyRecord[]>>({});
   const [selectedDept, setSelectedDept] = useState<string>("All");
 
-  // Storage focus states
   const [companyName, setCompanyName] = useState<string>("");
   const [fiscalYear, setFiscalYear] = useState<string>(new Date().getFullYear().toString());
   const [appMode, setAppMode] = useState<AppMode>('standard');
-  const [savedProfiles, setSavedProfiles] = useState<{ company: string; year: string }[]>([]);
+  const [savedProfiles, setSavedProfiles] = useState<{ company: string; year: string; mode?: AppMode }[]>([]);
   const [isLoadingStorage, setIsLoadingStorage] = useState(true);
+  const [masterAccounts, setMasterAccounts] = useState<Record<string, string>>({});
+  const [isTableThousands, setIsTableThousands] = useState(false);
 
-  // Load metadata and profiles on mount
-  useEffect(() => {
-    console.log("🔍 [Recovery] Aggressive storage scan started...");
-    const keys = Object.keys(localStorage);
-    const discoveredProfiles: { company: string; year: string }[] = [];
-
-    // 1. Scan for ANY budget data, even with old/wrong prefixes
-    keys.forEach(key => {
-      // Current prefix OR any key that looks like it has data
-      if (key.startsWith(STORAGE_KEY_PREFIX) || key.includes('budget_app_data')) {
-        try {
-          const val = localStorage.getItem(key);
-          if (!val) return;
-          const parsed = JSON.parse(val);
-
-          // It's a valid profile if it has company and month data
-          const company = parsed.companyName || parsed.company;
-          const year = parsed.fiscalYear || parsed.year;
-          const mode = parsed.appMode || 'standard';
-
-          if (company && year) {
-            console.log(`✨ [Recovery] Found profile: ${company} (${year}) in ${mode} mode`);
-            const alreadyInDiscovered = discoveredProfiles.some(p => p.company === company && p.year === year);
-            if (!alreadyInDiscovered) {
-              discoveredProfiles.push({ company, year });
-            }
-
-            // Normalize key if it was using an old prefix/name
-            const correctKey = `${STORAGE_KEY_PREFIX}${company}_${year}`;
-            if (key !== correctKey) {
-              localStorage.setItem(correctKey, JSON.stringify({
-                ...parsed,
-                companyName: company,
-                fiscalYear: year,
-                appMode: mode
-              }));
-            }
-          }
-        } catch (e) { }
+  // ── プロフィール一覧を SQL から取得 ──────────────────────────
+  const loadProfiles = useCallback(async () => {
+    try {
+      const res = await callApi('get_profiles');
+      if (res.success && Array.isArray(res.profiles)) {
+        const profiles = res.profiles.map((p: any) => ({
+          company: p.company_name,
+          year:    String(p.fiscal_year),
+          mode:    (p.app_mode ?? 'standard') as AppMode,
+        }));
+        setSavedProfiles(profiles);
+        return profiles;
       }
-    });
-
-    // 2. Load existing metadata
-    const metaStr = localStorage.getItem(METADATA_KEY);
-    let meta: AppMetadata = { savedProfiles: [] };
-    if (metaStr) {
-      try {
-        meta = JSON.parse(metaStr);
-      } catch (e) {
-        console.warn("⚠️ Meta corrupted, will rebuild");
-      }
+    } catch (e) {
+      console.warn('[Profiles] SQL fetch failed', e);
     }
-
-    // 3. Merge discovered into metadata
-    discoveredProfiles.forEach(p => {
-      if (!meta.savedProfiles.some(mp => mp.company === p.company && mp.year === p.year)) {
-        meta.savedProfiles.push(p);
-      }
-    });
-
-    setSavedProfiles(meta.savedProfiles);
-
-    // 4. Set/Restore last used profile
-    let lastProfile = meta.lastUsedProfile;
-    if (!lastProfile && meta.savedProfiles.length > 0) {
-      lastProfile = meta.savedProfiles[0];
-    }
-
-    if (lastProfile) {
-      setCompanyName(lastProfile.company);
-      setFiscalYear(lastProfile.year);
-      loadProfileData(lastProfile.company, lastProfile.year);
-
-      // Persist the repaired metadata
-      localStorage.setItem(METADATA_KEY, JSON.stringify({
-        ...meta,
-        lastUsedProfile: lastProfile
-      }));
-    }
-
-    setIsLoadingStorage(false);
-    console.log(`✅ [Recovery] Scan finished. Profiles found: ${meta.savedProfiles.length}`);
+    return [];
   }, []);
 
+  // ── 初回マウント時にプロフィールを読み込み ───────────────────
+  useEffect(() => {
+    (async () => {
+      const profiles = await loadProfiles();
+      if (profiles.length > 0) {
+        const first = profiles[0];
+        setCompanyName(first.company);
+        setFiscalYear(first.year);
+        setAppMode(first.mode ?? 'standard');
+        await loadProfileData(first.company, first.year);
+      }
+      setIsLoadingStorage(false);
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 財務データをSQLまたはlocalStorage(フォールバック)から取得 ─
   const normalizeLegacyDeptName = (name: string): string => {
     let clean = name.normalize('NFKC').trim();
     clean = clean.replace(/[()（）]/g, '').trim();
     const match = clean.match(/^(\d+)?\s*(.*)$/);
-    if (match && match[2]) {
-        return match[2].trim();
-    }
+    if (match && match[2]) return match[2].trim();
     return clean;
   };
 
-  const fetchSQLOrLocal = async (comp: string, y: string): Promise<Record<number, MonthlyRecord[]>> => {
+  const fetchFromSQL = async (comp: string, y: string): Promise<Record<number, MonthlyRecord[]>> => {
     try {
-      const res = await fetch(`https://kz801xs.xsrv.jp/budget_v6/api.php?action=get_financial_data`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ company: comp, year: parseInt(y) })
-      });
-      const result = await res.json();
-      
+      const result = await callApi('get_financial_data', { company: comp, year: parseInt(y) });
       if (result.success && Array.isArray(result.data) && result.data.length > 0) {
         const newData: Record<number, MonthlyRecord[]> = {};
         result.data.forEach((row: any) => {
           const mIdx = parseInt(row.month_index);
           if (!newData[mIdx]) newData[mIdx] = [];
-          
           newData[mIdx].push({
-            code: row.subject_code,
-            subject: row.subject_name,
+            code:       row.subject_code,
+            subject:    row.subject_name,
             department: row.department,
-            actual: parseFloat(row.actual || 0),
-            budget: parseFloat(row.budget || 0),
+            actual:     parseFloat(row.actual || 0),
+            budget:     parseFloat(row.budget || 0),
             prevYearActual: 0,
-            monthIndex: mIdx
+            monthIndex: mIdx,
           });
         });
-        console.log(`[Data Fetch] Loaded ${y} for ${comp} from SQL.`);
+        // actual も budget も全て 0 の月はアップロード済みとみなさない
+        // (予算 pre-clear の副産物などを除外)
+        Object.keys(newData).forEach(mStr => {
+          const m = parseInt(mStr);
+          const hasValue = newData[m].some(r => r.actual !== 0 || r.budget !== 0);
+          if (!hasValue) delete newData[m];
+        });
+        console.log(`[Data Fetch] SQL → ${comp} FY${y}, 有効月: ${Object.keys(newData).join(',')}`);
         return newData;
       }
     } catch (e) {
-      console.warn(`[Data Fetch] Failed to fetch SQL for ${comp} ${y}`, e);
+      console.warn(`[Data Fetch] SQL failed for ${comp} ${y}`, e);
     }
-    
-    // Fallback to localStorage
-    const storageKey = `${STORAGE_KEY_PREFIX}${comp}_${y}`;
-    const raw = localStorage.getItem(storageKey);
+
+    // localStorage フォールバック
+    const STORAGE_KEY_PREFIX = 'budget_app_data_';
+    const raw = typeof window !== 'undefined' ? localStorage.getItem(`${STORAGE_KEY_PREFIX}${comp}_${y}`) : null;
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
         if (parsed.dataByMonth) {
-          const normalizedData: Record<number, MonthlyRecord[]> = {};
+          const normalized: Record<number, MonthlyRecord[]> = {};
           Object.entries(parsed.dataByMonth as Record<number, MonthlyRecord[]>).forEach(([mIdx, records]) => {
-             normalizedData[parseInt(mIdx)] = records.map(r => ({
-               ...r,
-               department: normalizeLegacyDeptName(r.department)
-             }));
+            normalized[parseInt(mIdx)] = records.map(r => ({
+              ...r, department: normalizeLegacyDeptName(r.department),
+            }));
           });
-          console.log(`[Data Fetch] Loaded ${y} for ${comp} from LocalStorage (Fallback).`);
-          return normalizedData;
+          console.log(`[Data Fetch] localStorage fallback → ${comp} FY${y}`);
+          return normalized;
         }
-      } catch (e) {
-        console.error("Error parsing local storage fallback data", e);
-      }
+      } catch (e) { /* ignore */ }
     }
-
-    console.log(`[Data Fetch] No data found for ${comp} ${y}.`);
     return {};
   };
 
   const loadProfileData = async (company: string, year: string) => {
     if (!company || !year) return;
     setIsLoadingStorage(true);
-    
-    // Fetch Current Year (SQL -> LocalStorage fallback)
-    const currentData = await fetchSQLOrLocal(company, year);
+    const currentData = await fetchFromSQL(company, year);
     setDataByMonth(currentData);
-
-    // Fetch Previous Year (SQL -> LocalStorage fallback)
-    const prevYearStr = (parseInt(year) - 1).toString();
-    const prevData = await fetchSQLOrLocal(company, prevYearStr);
+    const prevData = await fetchFromSQL(company, (parseInt(year) - 1).toString());
     setPrevDataByMonth(prevData);
-
     setIsLoadingStorage(false);
   };
 
-  const saveProfileData = (company: string, year: string, data: Record<number, MonthlyRecord[]>, mode: AppMode = appMode) => {
-    if (!company) return;
-
-    const storageKey = `${STORAGE_KEY_PREFIX}${company}_${year}`;
-    const storageData: StorageData = {
-      companyName: company,
-      fiscalYear: year,
-      dataByMonth: data,
-      lastUpdated: new Date().toISOString(),
-      appMode: mode
-    };
-
-    // Save data (ignore quota exceeded errors since main truth is SQL)
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(storageData));
-    } catch (e) {
-      console.warn("[Storage] LocalStorage quota exceeded. Data is still safely in SQL.");
-    }
-
-    // Update metadata
-    const exists = savedProfiles.some(p => p.company === company && p.year === year);
-    let newProfiles = savedProfiles;
-    if (!exists) {
-      newProfiles = [...savedProfiles, { company, year }];
-      setSavedProfiles(newProfiles);
-    }
-
-    const newMeta: AppMetadata = {
-      savedProfiles: newProfiles,
-      lastUsedProfile: { company, year }
-    };
-    localStorage.setItem(METADATA_KEY, JSON.stringify(newMeta));
-  };
-
-  const handleProfileSwitch = (profileStr: string) => {
+  // ── プロフィール切り替え ────────────────────────────────────
+  const handleProfileSwitch = async (profileStr: string) => {
     const [company, year] = profileStr.split('|');
+    const profile = savedProfiles.find(p => p.company === company && p.year === year);
     setCompanyName(company);
     setFiscalYear(year);
-    loadProfileData(company, year);
-
-    // Save last used to metadata
-    const metaStr = localStorage.getItem(METADATA_KEY);
-    if (metaStr) {
-      const meta: AppMetadata = JSON.parse(metaStr);
-      localStorage.setItem(METADATA_KEY, JSON.stringify({
-        ...meta,
-        lastUsedProfile: { company, year }
-      }));
-    }
+    setAppMode(profile?.mode ?? 'standard');
+    // 最後にアクセスしたことを記録
+    await callApi('save_profile', { company, year: parseInt(year), app_mode: profile?.mode ?? 'standard' });
+    await loadProfileData(company, year);
   };
 
-  const deleteProfile = (e: React.MouseEvent, company: string, year: string) => {
+  // ── プロフィール削除 ────────────────────────────────────────
+  const deleteProfile = async (e: React.MouseEvent, company: string, year: string) => {
     e.stopPropagation();
-    if (!confirm(`Are you sure you want to delete data for ${company} (${year})?`)) return;
-
-    const storageKey = `${STORAGE_KEY_PREFIX}${company}_${year}`;
-    localStorage.removeItem(storageKey);
-
+    if (!confirm(`${company} (${year}) のデータを全て削除しますか？`)) return;
+    await callApi('delete_profile', { company, year: parseInt(year) });
     const newProfiles = savedProfiles.filter(p => !(p.company === company && p.year === year));
     setSavedProfiles(newProfiles);
-
-    const newMeta: AppMetadata = {
-      savedProfiles: newProfiles,
-      lastUsedProfile: companyName === company && fiscalYear === year ? undefined : { company: companyName, year: fiscalYear }
-    };
-    localStorage.setItem(METADATA_KEY, JSON.stringify(newMeta));
-
     if (companyName === company && fiscalYear === year) {
       setDataByMonth({});
       setPrevDataByMonth({});
     }
   };
 
-  const [masterAccounts, setMasterAccounts] = useState<Record<string, string>>({}); // code -> subject
+  // ── appMode 変更 ────────────────────────────────────────────
+  const handleModeChange = async (mode: AppMode) => {
+    setAppMode(mode);
+    if (companyName && fiscalYear) {
+      await callApi('save_profile', { company: companyName, year: parseInt(fiscalYear), app_mode: mode });
+      setSavedProfiles(prev => prev.map(p =>
+        p.company === companyName && p.year === fiscalYear ? { ...p, mode } : p,
+      ));
+    }
+  };
 
-  const handleDataLoaded = async (dataUpdate: number | Record<number, MonthlyRecord[]>, records?: MonthlyRecord[]) => {
-    if (!companyName) {
-      alert("Please enter a Company Name before uploading data.");
+  // ── データアップロード後の保存 ─────────────────────────────
+  const handleDataLoaded = async (
+    dataUpdate: number | Record<number, MonthlyRecord[]>,
+    records?: MonthlyRecord[],
+  ) => {
+    if (!companyName) { alert("先に企業名を設定してください。"); return; }
+
+    const allRecords: MonthlyRecord[] = typeof dataUpdate === 'number'
+      ? (records || [])
+      : Object.values(dataUpdate).flat();
+
+    const hasActual = allRecords.some(r => r.actual !== 0);
+    const dataType  = hasActual ? 'actual' : 'budget';
+
+    // ── 値が1件以上存在する月だけを保存対象にする ──────────────
+    // Excel は12ヶ月全列を持つため、空列（全0）の月も記録に含まれてしまう。
+    // アップロード対象外の月を上書きしないよう、非ゼロ値が存在する月のみ対象とする。
+    const activeMonths = new Set<number>();
+    allRecords.forEach(r => {
+      const val = dataType === 'actual' ? r.actual : r.budget;
+      if (val !== 0) activeMonths.add(r.monthIndex ?? 0);
+    });
+
+    if (activeMonths.size === 0) {
+      alert("アップロードファイルに有効なデータが見つかりません。");
       return;
     }
 
-    // 1. アップロードされたデータが「予算」か「実績」かを判定
-    const allRecords: MonthlyRecord[] = typeof dataUpdate === 'number' ? (records || []) : Object.values(dataUpdate).flat();
-    
-    const hasBudget = allRecords.some(r => r.budget !== 0);
-    const hasActual = allRecords.some(r => r.actual !== 0);
-    const dataType = hasActual ? 'actual' : 'budget';
+    console.log(`[Upload] 保存対象月: ${Array.from(activeMonths).sort((a,b)=>a-b).join(', ')}`);
 
-    // 2. SQLサーバーへ保存送信 (チャンクに分けて送信)
     const CHUNK_SIZE = 1000;
-    const recordsToSave = allRecords.map(r => ({
-      month: r.monthIndex,
-      department: r.department,
-      code: r.code,
-      subject: r.subject,
-      value: dataType === 'actual' ? r.actual : r.budget
-    }));
+    // 値が存在する月のレコードだけに絞る（0値行も同月の他行が非0なら含む）
+    const recordsToSave = allRecords
+      .filter(r => activeMonths.has(r.monthIndex ?? 0))
+      .map(r => ({
+        month:      r.monthIndex,
+        department: r.department,
+        code:       r.code,
+        subject:    r.subject,
+        value:      dataType === 'actual' ? r.actual : r.budget,
+      }));
 
     try {
-      // 過去に BudgetMode: false で誤って「予算」を「実績」としてアップロードしてしまった場合、
-      // SQLの actual カラムに予算の数字が入ったまま残ってしまいます。
-      // これを打ち消すため、予算アップロード時は、対象の actual を一律 0 で上書きクリアします。
+      // 予算アップロード時は対象月の actual を 0 クリア
       if (dataType === 'budget') {
-        console.log(`[SQL Save] Pre-clearing false actuals for budget mode...`);
         const clearRecords = recordsToSave.map(r => ({ ...r, value: 0 }));
         for (let i = 0; i < clearRecords.length; i += CHUNK_SIZE) {
-          await fetch(`https://kz801xs.xsrv.jp/budget_v6/api.php?action=save_financial_data`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              company: companyName,
-              year: parseInt(fiscalYear),
-              dataType: 'actual', // Target the actual column to clear it
-              records: clearRecords.slice(i, i + CHUNK_SIZE)
-            })
+          await callApi('save_financial_data', {
+            company: companyName, year: parseInt(fiscalYear),
+            dataType: 'actual', records: clearRecords.slice(i, i + CHUNK_SIZE),
           });
         }
       }
 
-      console.log(`[SQL Save] Starting save for ${recordsToSave.length} records in chunks of ${CHUNK_SIZE}...`);
-      
       for (let i = 0; i < recordsToSave.length; i += CHUNK_SIZE) {
-        const chunk = recordsToSave.slice(i, i + CHUNK_SIZE);
-        
-        const res = await fetch(`https://kz801xs.xsrv.jp/budget_v6/api.php?action=save_financial_data`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            company: companyName,
-            year: parseInt(fiscalYear),
-            dataType: dataType,
-            records: chunk
-          })
+        const res = await callApi('save_financial_data', {
+          company: companyName, year: parseInt(fiscalYear),
+          dataType, records: recordsToSave.slice(i, i + CHUNK_SIZE),
         });
-        
-        const result = await res.json();
-        if (!result.success) {
-          throw new Error(result.message || "Unknown error during chunk save");
-        }
-        
-        console.log(`[SQL Save] Progress: ${Math.min(i + CHUNK_SIZE, recordsToSave.length)} / ${recordsToSave.length}`);
+        if (!res.success) throw new Error(res.message || 'チャンク保存エラー');
+        console.log(`[SQL Save] ${Math.min(i + CHUNK_SIZE, recordsToSave.length)} / ${recordsToSave.length}`);
       }
-      
-      console.log(`✅ ${dataType} data saved to SQL successfully (${recordsToSave.length} total records).`);
-      
-      // Update LocalStorage as a backup/cache (so user doesn't panic if SQL isn't completely setup)
-      const currentData = await fetchSQLOrLocal(companyName, fiscalYear);
-      saveProfileData(companyName, fiscalYear, currentData, appMode);
-      
-      // 再読み込みして表示を更新
-      loadProfileData(companyName, fiscalYear);
-      
+
+      console.log(`✅ ${dataType} saved (${recordsToSave.length} records)`);
+
+      // プロフィール一覧を更新
+      await loadProfiles();
+      await loadProfileData(companyName, fiscalYear);
     } catch (e: any) {
-      console.error("Failed to save data to SQL:", e);
+      console.error("Save failed:", e);
       alert("データ保存に失敗しました: " + e.message);
     }
   };
 
+  // ── セル値の直接編集 ──────────────────────────────────────
+  const handleCellEdit = useCallback(async (
+    dept: string, code: string, subject: string,
+    month: number, field: 'actual' | 'budget', rawValue: number,
+  ) => {
+    try {
+      const res = await callApi('save_financial_data', {
+        company:  companyName,
+        year:     parseInt(fiscalYear),
+        dataType: field,
+        records:  [{ month, department: dept, code, subject, value: rawValue }],
+      });
+      if (!res.success) throw new Error(res.message);
+      // 画面を再読み込み
+      const updated = await fetchFromSQL(companyName, fiscalYear);
+      setDataByMonth(updated);
+    } catch (e: any) {
+      alert('保存失敗: ' + e.message);
+    }
+  }, [companyName, fiscalYear]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 集計 ──────────────────────────────────────────────────
   const aggregatedData: PnLData = useMemo(() => {
     return aggregateData(dataByMonth, appMode, prevDataByMonth, masterAccounts);
   }, [dataByMonth, appMode, prevDataByMonth, masterAccounts]);
 
-
   const financialReport = useMemo(() => {
-    // Filter rows based on selected department
-    // IMPORTANT: Always include BS rows (貸借対照表) for ratio calculations
-    // Only filter P/L rows by department
     const relevantRows = selectedDept === "All"
       ? aggregatedData.rows
       : aggregatedData.rows.filter(r =>
-        r.department.includes('貸借対照表') || // Always include BS
-        r.department === selectedDept || // Filter P/L by department
-        (appMode === 'manufacturing' && r.department.includes('製造原価報告書')) // Include Mfg in Mfg mode
-      );
+          r.department.includes('貸借対照表') ||
+          r.department === selectedDept ||
+          (appMode === 'manufacturing' && r.department.includes('製造原価報告書'))
+        );
+    return analyzeFinancials({ ...aggregatedData, rows: relevantRows });
+  }, [aggregatedData, selectedDept, appMode]);
 
-    return analyzeFinancials({
-      ...aggregatedData,
-      rows: relevantRows
-    });
-  }, [aggregatedData, selectedDept]);
-
-  const hasData = aggregatedData.rows.length > 0;
+  const hasData    = aggregatedData.rows.length > 0;
   const departments = ["All", ...aggregatedData.departments];
 
+  // ── Excel エクスポート ────────────────────────────────────
   const handleExport = () => {
-    // ... (rest of export logic, keeping as is)
     const wb = XLSX.utils.book_new();
     const allPnlRows: any[] = [];
     const allRatioRows: any[] = [];
     const allCommentRows: any[] = [];
     const deptsToExport = ["All", ...aggregatedData.departments];
-    const monthNamesShort = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"];
-    const monthIndices = [3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2];
+    const monthNamesShort = ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar"];
+    const monthIndices    = [3,4,5,6,7,8,9,10,11,0,1,2];
 
-    deptsToExport.forEach((dept, deptIdx) => {
+    deptsToExport.forEach(dept => {
       const relevantRows = dept === "All"
         ? aggregatedData.rows
         : aggregatedData.rows.filter(r => r.department === dept);
-
-      const deptData: PnLData = {
-        departments: aggregatedData.departments,
-        rows: relevantRows,
-        totals: aggregatedData.totals
-      };
+      const deptData = { ...aggregatedData, rows: relevantRows };
       const deptReport = analyzeFinancials(deptData);
 
       allPnlRows.push({ Department: `--- ${dept} ---`, Code: "---", Subject: "---" });
       relevantRows.forEach(r => {
         const row: any = {
-          Department: r.department,
-          Code: r.code,
-          Subject: r.subject,
+          Department: r.department, Code: r.code, Subject: r.subject,
           "1st Half Actual": r.totalFirstHalf.actual,
           "2nd Half Actual": r.totalSecondHalf.actual,
-          "Total Actual": r.totalAnnual.actual,
-          "Total Budget": r.totalAnnual.budget,
-          "Variance": r.variance,
+          "Total Actual":    r.totalAnnual.actual,
+          "Total Budget":    r.totalAnnual.budget,
+          "Variance":        r.variance,
         };
         monthIndices.forEach((m, i) => {
-          const mName = monthNamesShort[i];
-          row[`${mName} Actual`] = r.monthlyData[m]?.actual || 0;
-          row[`${mName} Budget`] = r.monthlyData[m]?.budget || 0;
+          row[`${monthNamesShort[i]} Actual`] = r.monthlyData[m]?.actual || 0;
+          row[`${monthNamesShort[i]} Budget`] = r.monthlyData[m]?.budget || 0;
         });
         allPnlRows.push(row);
       });
       allPnlRows.push({});
 
       if (dept === "All") {
-        allRatioRows.push({ "Metric (Eng)": `--- ${dept} ---` });
         deptReport.metrics.forEach(def => {
-          const row: any = { "Metric (Eng)": def.labelEng, "Metric (JP)": def.labelJp, "Meaning": def.meaning };
+          const row: any = { "Metric (Eng)": def.labelEng, "Metric (JP)": def.labelJp };
           monthIndices.forEach((m, i) => {
-            const mName = monthNamesShort[i];
-            const value = deptReport.values[def.id]?.[m] ?? 0;
-            row[mName] = parseFloat(value.toFixed(1));
+            row[monthNamesShort[i]] = parseFloat((deptReport.values[def.id]?.[m] ?? 0).toFixed(1));
           });
           row["1st Half"] = parseFloat((deptReport.values[def.id]?.['1H'] ?? 0).toFixed(1));
           row["2nd Half"] = parseFloat((deptReport.values[def.id]?.['2H'] ?? 0).toFixed(1));
           row["Total Year"] = parseFloat((deptReport.values[def.id]?.['FY'] ?? 0).toFixed(1));
           allRatioRows.push(row);
         });
-        allRatioRows.push({});
       }
-
-      allCommentRows.push({ Month: `--- ${dept} ---` });
-      monthIndices.forEach((m, i) => {
-        const mName = monthNamesShort[i];
-        const msgs = deptReport.comments[m];
-        if (msgs && msgs.length > 0) {
-          msgs.forEach(msg => { allCommentRows.push({ Month: mName, Alert: msg }); });
-        }
-      });
-      allCommentRows.push({});
     });
 
-    const wsPnL = XLSX.utils.json_to_sheet(allPnlRows);
-    XLSX.utils.book_append_sheet(wb, wsPnL, "Budget Analysis");
-    const wsFin = XLSX.utils.json_to_sheet(allRatioRows);
-    XLSX.utils.book_append_sheet(wb, wsFin, "Financial Ratios");
-    const wsDashboard = XLSX.utils.json_to_sheet([
-      { Category: "KPI - 本年度累計", Metric: "売上高", Value: (financialReport.values['sales']?.['FY'] || 0).toLocaleString() },
-      { Category: "KPI - 本年度累計", Metric: "営業利益", Value: (financialReport.values['operating_profit']?.['FY'] || 0).toLocaleString() },
-    ]);
-    XLSX.utils.book_append_sheet(wb, wsDashboard, "Dashboard Summary");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allPnlRows), "Budget Analysis");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allRatioRows), "Financial Ratios");
     XLSX.writeFile(wb, `${companyName}_${fiscalYear}_Budget_Report.xlsx`);
   };
 
-  const [isTableThousands, setIsTableThousands] = useState(false);
-
-  // Auth Guard
+  // ── Auth ──────────────────────────────────────────────────
   if (!currentUser) {
     return <LoginSystem onLoginSuccess={setCurrentUser} />;
   }
@@ -525,18 +390,14 @@ export default function Home() {
                     variant={isTableThousands ? "ghost" : "secondary"}
                     className={`h-8 px-3 text-xs ${!isTableThousands ? "bg-white shadow-sm" : ""}`}
                     onClick={() => setIsTableThousands(false)}
-                  >
-                    円表示
-                  </Button>
+                  >円表示</Button>
                   <Button
                     variant={!isTableThousands ? "ghost" : "secondary"}
                     className={`h-8 px-3 text-xs ${isTableThousands ? "bg-white shadow-sm" : ""}`}
                     onClick={() => setIsTableThousands(true)}
-                  >
-                    千円単位
-                  </Button>
+                  >千円単位</Button>
                 </div>
-                <Button variant="outline" onClick={() => { if (confirm("Clear current visible data?")) setDataByMonth({}); }} className="gap-2">
+                <Button variant="outline" onClick={() => { if (confirm("表示データをリセットしますか？")) setDataByMonth({}); }} className="gap-2">
                   <RefreshCw className="h-4 w-4" /> Reset View
                 </Button>
                 <Button onClick={handleExport} className="gap-2 bg-indigo-600 hover:bg-indigo-700">
@@ -558,43 +419,47 @@ export default function Home() {
                 <div className="space-y-4">
                   <div className="space-y-1.5">
                     <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">表示企業 (Company)</label>
-                    <Select value={companyName} onValueChange={(val) => {
-                      if (val === "NEW") {
-                        const name = prompt("Enter new company name:");
-                        if (name) {
-                          setCompanyName(name);
-                          loadProfileData(name, fiscalYear);
+                    {savedProfiles.length > 0 ? (
+                      <Select value={companyName} onValueChange={async (val) => {
+                        if (val === "__new__") {
+                          const name = prompt("新しい企業名を入力:");
+                          if (name) { setCompanyName(name); await loadProfileData(name, fiscalYear); }
+                        } else {
+                          setCompanyName(val);
+                          await loadProfileData(val, fiscalYear);
                         }
-                      } else {
-                        setCompanyName(val);
-                        loadProfileData(val, fiscalYear);
-                      }
-                    }}>
-                      <SelectTrigger className="h-10">
-                        <SelectValue placeholder="Select Company" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {Array.from(new Set(savedProfiles.map(p => p.company))).map(c => (
-                          <SelectItem key={c} value={c}>{c}</SelectItem>
-                        ))}
-                        <SelectItem value="NEW" className="text-indigo-600 font-medium">
-                          + New Company...
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                      }}>
+                        <SelectTrigger className="h-10"><SelectValue placeholder="企業を選択" /></SelectTrigger>
+                        <SelectContent>
+                          {Array.from(new Set(savedProfiles.map(p => p.company))).map(c => (
+                            <SelectItem key={c} value={c}>{c}</SelectItem>
+                          ))}
+                          <SelectItem value="__new__" className="text-indigo-600 font-medium">+ New Company...</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Input
+                        className="h-10"
+                        placeholder="企業名を入力"
+                        value={companyName}
+                        onChange={e => setCompanyName(e.target.value)}
+                        onBlur={async () => { if (companyName) await loadProfileData(companyName, fiscalYear); }}
+                        onKeyDown={async e => {
+                          if (e.key === 'Enter' && companyName) await loadProfileData(companyName, fiscalYear);
+                        }}
+                      />
+                    )}
                   </div>
 
                   <div className="space-y-1.5">
                     <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">表示年度 (Fiscal Year)</label>
-                    <Select value={fiscalYear} onValueChange={(val) => {
+                    <Select value={fiscalYear} onValueChange={async (val) => {
                       setFiscalYear(val);
-                      loadProfileData(companyName, val);
+                      await loadProfileData(companyName, val);
                     }}>
-                      <SelectTrigger className="h-10">
-                        <SelectValue placeholder="Select Term / Year" />
-                      </SelectTrigger>
+                      <SelectTrigger className="h-10"><SelectValue placeholder="Select Year" /></SelectTrigger>
                       <SelectContent>
-                        {[2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030].map(y => (
+                        {[2023,2024,2025,2026,2027,2028,2029,2030].map(y => (
                           <SelectItem key={y} value={y.toString()}>第{y - 1977}期 (FY{y})</SelectItem>
                         ))}
                       </SelectContent>
@@ -604,44 +469,39 @@ export default function Home() {
               </div>
 
               <div className="space-y-2 pt-2 border-t border-slate-100">
-                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">分析モード (Analysis Mode)</label>
+                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">分析モード</label>
                 <div className="flex bg-slate-100 p-1 rounded-lg">
                   <Button
                     variant={appMode === 'standard' ? 'secondary' : 'ghost'}
                     className={`flex-1 h-8 text-[11px] font-bold ${appMode === 'standard' ? 'bg-white shadow-sm' : ''}`}
-                    onClick={() => { setAppMode('standard'); saveProfileData(companyName, fiscalYear, dataByMonth, 'standard'); }}
-                  >
-                    通常
-                  </Button>
+                    onClick={() => handleModeChange('standard')}
+                  >通常</Button>
                   <Button
                     variant={appMode === 'manufacturing' ? 'secondary' : 'ghost'}
                     className={`flex-1 h-8 text-[11px] font-bold ${appMode === 'manufacturing' ? 'bg-white shadow-sm' : ''}`}
-                    onClick={() => { setAppMode('manufacturing'); saveProfileData(companyName, fiscalYear, dataByMonth, 'manufacturing'); }}
-                  >
-                    製造業
-                  </Button>
+                    onClick={() => handleModeChange('manufacturing')}
+                  >製造業</Button>
                 </div>
               </div>
 
               {savedProfiles.length > 0 && (
                 <div className="pt-2 border-t border-slate-100">
-                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2 underline decoration-indigo-200 underline-offset-4">保存済みデータ管理</label>
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">保存済みデータ管理</label>
                   <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
                     {savedProfiles.map(p => (
-                      <div 
-                        key={`${p.company}|${p.year}`} 
+                      <div
+                        key={`${p.company}|${p.year}`}
                         onClick={() => handleProfileSwitch(`${p.company}|${p.year}`)}
                         className={cn(
                           "flex items-center justify-between p-2 rounded-md text-xs cursor-pointer transition-colors group",
-                          companyName === p.company && fiscalYear === p.year 
-                            ? "bg-indigo-50 border border-indigo-100 text-indigo-700" 
+                          companyName === p.company && fiscalYear === p.year
+                            ? "bg-indigo-50 border border-indigo-100 text-indigo-700"
                             : "hover:bg-slate-50 text-slate-600"
                         )}
                       >
                         <span className="font-medium">{p.company} ({p.year})</span>
                         <Button
-                          variant="ghost"
-                          size="sm"
+                          variant="ghost" size="sm"
                           className="h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 hover:text-rose-500"
                           onClick={(e) => deleteProfile(e, p.company, p.year)}
                         >
@@ -657,24 +517,12 @@ export default function Home() {
             <FileUpload
               onDataLoaded={handleDataLoaded}
               loadedMonths={Object.keys(dataByMonth).map(Number)}
-              onReset={() => { if (confirm("Clear data for this profile?")) { setDataByMonth({}); saveProfileData(companyName, fiscalYear, {}); } }}
+              onReset={() => { if (confirm("このプロファイルのデータをクリアしますか？")) setDataByMonth({}); }}
             />
 
             <BackupManager
               savedProfiles={savedProfiles}
-              onDataImported={() => {
-                // Reload metadata and profiles
-                const metaStr = localStorage.getItem(METADATA_KEY);
-                if (metaStr) {
-                  const meta: AppMetadata = JSON.parse(metaStr);
-                  setSavedProfiles(meta.savedProfiles);
-                  if (meta.lastUsedProfile) {
-                    setCompanyName(meta.lastUsedProfile.company);
-                    setFiscalYear(meta.lastUsedProfile.year);
-                    loadProfileData(meta.lastUsedProfile.company, meta.lastUsedProfile.year);
-                  }
-                }
-              }}
+              onDataImported={loadProfiles}
             />
 
             {hasData && (
@@ -682,9 +530,7 @@ export default function Home() {
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-400 uppercase">Department Filter</label>
                   <Select value={selectedDept} onValueChange={setSelectedDept}>
-                    <SelectTrigger className="h-9">
-                      <SelectValue />
-                    </SelectTrigger>
+                    <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {departments.map(d => (
                         <SelectItem key={d} value={d}>{d}</SelectItem>
@@ -701,12 +547,7 @@ export default function Home() {
               <Tabs
                 defaultValue="dashboard"
                 className="w-full"
-                onValueChange={(value) => {
-                  // Reset to "All" when switching to Dashboard tab
-                  if (value === "dashboard") {
-                    setSelectedDept("All");
-                  }
-                }}
+                onValueChange={(value) => { if (value === "dashboard") setSelectedDept("All"); }}
               >
                 <TabsList className="grid w-full grid-cols-7">
                   <TabsTrigger value="dashboard" className="flex gap-2">
@@ -747,20 +588,26 @@ export default function Home() {
                     selectedDepartment={selectedDept === "All" ? null : selectedDept}
                     isThousands={isTableThousands}
                     sheetFilter={['損益計算書', '販売費及び一般管理費']}
+                    onCellEdit={handleCellEdit}
                   />
                 </TabsContent>
 
-                <TabsContent value="mfg-report" className="mt-4 text-slate-900">
+                <TabsContent value="mfg-report" className="mt-4">
                   <VarianceTable
                     data={aggregatedData}
                     selectedDepartment={null}
                     isThousands={isTableThousands}
                     sheetFilter={['製造原価報告書']}
+                    onCellEdit={handleCellEdit}
                   />
                 </TabsContent>
 
                 <TabsContent value="bs-data" className="mt-4">
-                  <BSTable data={aggregatedData} isThousands={isTableThousands} />
+                  <BSTable
+                    data={aggregatedData}
+                    isThousands={isTableThousands}
+                    onCellEdit={handleCellEdit}
+                  />
                 </TabsContent>
 
                 <TabsContent value="bs-sp" className="mt-4">
@@ -776,7 +623,6 @@ export default function Home() {
                 </TabsContent>
 
                 <TabsContent value="dept-pl" className="mt-4">
-                  {/* Second-tier tabs for Department Analysis */}
                   <Tabs defaultValue="dept-dashboard" className="w-full">
                     <TabsList className="grid w-full grid-cols-5">
                       <TabsTrigger value="dept-dashboard" className="flex gap-2">
@@ -814,6 +660,7 @@ export default function Home() {
                         allDepartments={departments}
                         onDepartmentChange={setSelectedDept}
                         onToggleThousands={() => setIsTableThousands(!isTableThousands)}
+                        onCellEdit={handleCellEdit}
                       />
                     </TabsContent>
 
@@ -835,6 +682,7 @@ export default function Home() {
                         allDepartments={departments}
                         onDepartmentChange={setSelectedDept}
                         onToggleThousands={() => setIsTableThousands(!isTableThousands)}
+                        onCellEdit={handleCellEdit}
                       />
                     </TabsContent>
 
@@ -852,13 +700,8 @@ export default function Home() {
                   </Tabs>
                 </TabsContent>
 
-                {/* Keep AI Advisor hidden for now */}
                 <TabsContent value="ai" className="mt-4 hidden">
-                  <AIAdvisor
-                    data={aggregatedData}
-                    report={financialReport}
-                    selectedDept={selectedDept}
-                  />
+                  <AIAdvisor data={aggregatedData} report={financialReport} selectedDept={selectedDept} />
                 </TabsContent>
               </Tabs>
             ) : (

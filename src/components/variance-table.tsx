@@ -1,9 +1,18 @@
 "use client"
 
+import { useState } from 'react';
 import { PnLData } from '@/lib/types';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
-import { cn } from '@/lib/utils'; // Assuming cn exists or use clsx directly
+import { cn } from '@/lib/utils';
+
+// 月次累計は常にセル合計から計算（calc-first モード）
+const FIRST_HALF  = [3, 4, 5, 6, 7, 8];
+const SECOND_HALF = [9, 10, 11, 0, 1, 2];
+const Q1 = [3, 4, 5];
+const Q2 = [6, 7, 8];
+const Q3 = [9, 10, 11];
+const Q4 = [0, 1, 2];
 
 interface VarianceTableProps {
     data: PnLData;
@@ -11,24 +20,60 @@ interface VarianceTableProps {
     isThousands?: boolean;
     sheetFilter?: string[];
     dataType?: 'actual' | 'budget' | 'prevYear';
+    onCellEdit?: (
+        dept: string, code: string, subject: string,
+        month: number, field: 'actual' | 'budget', rawValue: number,
+    ) => void;
 }
 
-// Fiscal Year Order: Apr=3 ... Dec=11, Jan=0 ... Mar=2
 const MONTH_ORDER = [3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2];
-const MONTH_NAMES = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"];
+const MONTH_NAMES = ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar"];
 
-export function VarianceTable({ data, selectedDepartment, isThousands = true, sheetFilter }: VarianceTableProps) {
-    // Filter rows by department if selected
+interface EditingCell { dept: string; code: string; subject: string; month: number; }
+
+export function VarianceTable({
+    data, selectedDepartment, isThousands = true, sheetFilter, onCellEdit,
+}: VarianceTableProps) {
+    const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
+    const [editValue, setEditValue]     = useState<string>('');
+    const [saving, setSaving]           = useState(false);
+
     let filteredRows = selectedDepartment
         ? data.rows.filter(r => r.department === selectedDepartment)
         : data.rows;
 
-    // Apply sheet filter if provided
     if (sheetFilter && sheetFilter.length > 0) {
         filteredRows = filteredRows.filter(r =>
-            sheetFilter.some(sheet => r.department.includes(sheet))
+            sheetFilter.some(s => r.department.includes(s))
         );
     }
+
+    const sumMonths = (row: typeof filteredRows[0], months: number[]) =>
+        months.reduce((s, m) => s + (row.monthlyData[m]?.actual || 0), 0);
+
+    const startEdit = (row: typeof filteredRows[0], month: number) => {
+        if (!onCellEdit) return;
+        const rawVal = row.monthlyData[month]?.actual || 0;
+        const displayVal = isThousands ? Math.floor(rawVal / 1000) : rawVal;
+        setEditingCell({ dept: row.department, code: row.code, subject: row.subject, month });
+        setEditValue(displayVal === 0 ? '' : String(displayVal));
+    };
+
+    const commitEdit = async (row: typeof filteredRows[0], month: number) => {
+        if (!onCellEdit) return;
+        const typed    = parseFloat(editValue.replace(/,/g, '')) || 0;
+        const rawValue = isThousands ? typed * 1000 : typed;
+        setSaving(true);
+        await onCellEdit(row.department, row.code, row.subject, month, 'actual', rawValue);
+        setSaving(false);
+        setEditingCell(null);
+    };
+
+    const isEditing = (row: typeof filteredRows[0], month: number) =>
+        editingCell?.dept === row.department &&
+        editingCell?.code === row.code &&
+        editingCell?.subject === row.subject &&
+        editingCell?.month === month;
 
     return (
         <div className="space-y-6">
@@ -36,55 +81,65 @@ export function VarianceTable({ data, selectedDepartment, isThousands = true, sh
                 <CardHeader className="bg-slate-50 border-b pb-4">
                     <div className="flex justify-between items-start">
                         <CardTitle className="text-xl">
-                            P&L Matrix (Fiscal Year) - <span className="text-blue-600">{selectedDepartment || "All Departments"}</span>
+                            P&L Matrix (Fiscal Year) -{' '}
+                            <span className="text-blue-600">{selectedDepartment || "All Departments"}</span>
                         </CardTitle>
-                        <span className="text-[10px] text-slate-400 font-medium bg-slate-50 px-2 py-0.5 rounded border">
-                            単位: {isThousands ? "千円" : "円"}
-                        </span>
+                        <div className="flex items-center gap-2">
+                            {onCellEdit && (
+                                <span className="text-[10px] text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">
+                                    ✏️ セルクリックで編集
+                                </span>
+                            )}
+                            <span className="text-[10px] text-slate-400 font-medium bg-slate-50 px-2 py-0.5 rounded border">
+                                単位: {isThousands ? "千円" : "円"}
+                            </span>
+                        </div>
                     </div>
                 </CardHeader>
                 <CardContent className="p-0">
                     <div className="h-[700px] w-full overflow-auto">
-                        {/* 
-                   Increased min-w to accommodate new columns.
-                   Columns: Code(100) + Subject(200) + 12 Months(80*12=960) + 
-                   1st Half(100) + 2nd Half(100) + Total(100) + Variance(80) 
-                   ~ 1600px 
-               */}
-                        <div className="min-w-[1600px]">
+                        <div className="min-w-[1800px]">
                             <Table>
                                 <TableHeader>
                                     <TableRow className="bg-slate-50 hover:bg-slate-50">
                                         <TableHead className="w-[80px] sticky left-0 bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Code</TableHead>
                                         <TableHead className="w-[200px] sticky left-[80px] bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Subject</TableHead>
-
-                                        {/* Months */}
                                         {MONTH_NAMES.map(m => (
-                                            <TableHead key={m} className="text-right min-w-[100px] text-slate-600 font-semibold">{m}</TableHead>
+                                            <TableHead key={m} className="text-right min-w-[90px] text-slate-600 font-semibold">{m}</TableHead>
                                         ))}
-
-                                        {/* Quarterly Totals */}
-                                        <TableHead className="text-right font-bold w-[110px] bg-green-50 text-green-900 border-l border-green-100">1Q<br /><span className="text-[10px] font-normal">Apr-Jun</span></TableHead>
-                                        <TableHead className="text-right font-bold w-[110px] bg-green-50 text-green-900 border-green-100">2Q<br /><span className="text-[10px] font-normal">Jul-Sep</span></TableHead>
-                                        <TableHead className="text-right font-bold w-[120px] bg-blue-50 text-blue-900 border-l border-blue-100">1H<br /><span className="text-[10px] font-normal">上期合計</span></TableHead>
-                                        <TableHead className="text-right font-bold w-[110px] bg-orange-50 text-orange-900 border-l border-orange-100">3Q<br /><span className="text-[10px] font-normal">Oct-Dec</span></TableHead>
-                                        <TableHead className="text-right font-bold w-[110px] bg-orange-50 text-orange-900 border-orange-100">4Q<br /><span className="text-[10px] font-normal">Jan-Mar</span></TableHead>
-                                        <TableHead className="text-right font-bold w-[120px] bg-blue-50 text-blue-900 border-l border-blue-100">2H<br /><span className="text-[10px] font-normal">下期合計</span></TableHead>
-                                        <TableHead className="text-right font-bold w-[120px] bg-slate-100 text-slate-900 border-l">FY Total<br /><span className="text-[10px] font-normal">年間</span></TableHead>
-
-                                        {/* Variance */}
-                                        <TableHead className="text-right font-bold w-[110px] text-xs">Var %<br />(vs Bud)</TableHead>
+                                        <TableHead className="text-right font-bold w-[100px] bg-green-50 text-green-900 border-l border-green-100">1Q<br /><span className="text-[10px] font-normal">Apr-Jun</span></TableHead>
+                                        <TableHead className="text-right font-bold w-[100px] bg-green-50 text-green-900 border-green-100">2Q<br /><span className="text-[10px] font-normal">Jul-Sep</span></TableHead>
+                                        <TableHead className="text-right font-bold w-[110px] bg-blue-50 text-blue-900 border-l border-blue-100">1H<br /><span className="text-[10px] font-normal">上期合計</span></TableHead>
+                                        <TableHead className="text-right font-bold w-[100px] bg-orange-50 text-orange-900 border-l border-orange-100">3Q<br /><span className="text-[10px] font-normal">Oct-Dec</span></TableHead>
+                                        <TableHead className="text-right font-bold w-[100px] bg-orange-50 text-orange-900 border-orange-100">4Q<br /><span className="text-[10px] font-normal">Jan-Mar</span></TableHead>
+                                        <TableHead className="text-right font-bold w-[110px] bg-blue-50 text-blue-900 border-l border-blue-100">2H<br /><span className="text-[10px] font-normal">下期合計</span></TableHead>
+                                        <TableHead className="text-right font-bold w-[110px] bg-slate-100 text-slate-900 border-l">FY Total<br /><span className="text-[10px] font-normal">年間</span></TableHead>
+                                        <TableHead className="text-right font-bold w-[100px] text-xs">Var %<br />(vs Bud)</TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
                                     {filteredRows.map((row, idx) => {
-                                        const variancePercent = row.totalAnnual.budget !== 0
-                                            ? ((row.totalAnnual.actual - row.totalAnnual.budget) / row.totalAnnual.budget) * 100
+                                        // ── calc-first: 常にセル合計から計算 ──────────
+                                        const q1Val  = sumMonths(row, Q1);
+                                        const q2Val  = sumMonths(row, Q2);
+                                        const q3Val  = sumMonths(row, Q3);
+                                        const q4Val  = sumMonths(row, Q4);
+                                        const h1Val  = q1Val + q2Val;
+                                        const h2Val  = q3Val + q4Val;
+                                        const fyVal  = h1Val + h2Val;
+                                        const budFY  = FIRST_HALF.concat(SECOND_HALF).reduce((s, m) => s + (row.monthlyData[m]?.budget || 0), 0);
+                                        const varPct = budFY !== 0
+                                            ? ((fyVal - budFY) / budFY) * 100
                                             : 0;
 
-                                        // Alternating row colors for readability
+                                        const fmt = (v: number) =>
+                                            (isThousands ? Math.floor(v / 1000) : v).toLocaleString();
+
                                         return (
-                                            <TableRow key={`${row.department}-${row.code}-${row.subject}`} className={idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"}>
+                                            <TableRow
+                                                key={`${row.department}-${row.code}-${row.subject}`}
+                                                className={idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"}
+                                            >
                                                 <TableCell className={cn(
                                                     "font-mono text-xs text-slate-500 sticky left-0 z-10 border-r shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
                                                     idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
@@ -92,61 +147,72 @@ export function VarianceTable({ data, selectedDepartment, isThousands = true, sh
                                                 <TableCell className={cn(
                                                     "sticky left-[80px] border-r font-medium text-sm z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
                                                     idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
-                                                )}>
-                                                    {row.subject}
-                                                </TableCell>
+                                                )}>{row.subject}</TableCell>
 
-                                                {/* Monthly Data */}
                                                 {MONTH_ORDER.map(m => {
-                                                    const val = row.monthlyData[m]?.actual || 0;
-                                                    const displayVal = isThousands ? Math.floor(val / 1000) : val;
+                                                    const rawVal     = row.monthlyData[m]?.actual || 0;
+                                                    const displayVal = isThousands ? Math.floor(rawVal / 1000) : rawVal;
+                                                    const editing    = isEditing(row, m);
+
                                                     return (
-                                                        <TableCell key={m} className="text-right text-xs text-gray-600">
-                                                            {val !== 0 ? displayVal.toLocaleString() : "-"}
+                                                        <TableCell
+                                                            key={m}
+                                                            className={cn(
+                                                                "text-right text-xs p-0",
+                                                                onCellEdit ? "cursor-pointer hover:bg-indigo-50" : "",
+                                                                editing ? "bg-indigo-50" : ""
+                                                            )}
+                                                            onClick={() => !editing && startEdit(row, m)}
+                                                        >
+                                                            {editing ? (
+                                                                <input
+                                                                    autoFocus
+                                                                    className="w-full text-right text-xs px-1 py-0.5 border border-indigo-400 rounded outline-none bg-white"
+                                                                    value={editValue}
+                                                                    onChange={e => setEditValue(e.target.value)}
+                                                                    onBlur={() => commitEdit(row, m)}
+                                                                    onKeyDown={e => {
+                                                                        if (e.key === 'Enter') commitEdit(row, m);
+                                                                        if (e.key === 'Escape') setEditingCell(null);
+                                                                    }}
+                                                                    disabled={saving}
+                                                                />
+                                                            ) : (
+                                                                <span className="px-2 py-1 block">
+                                                                    {rawVal !== 0 ? displayVal.toLocaleString() : "-"}
+                                                                </span>
+                                                            )}
                                                         </TableCell>
                                                     );
                                                 })}
 
-                                                {/* Quarterly Totals */}
-                                                <TableCell className="text-right font-bold text-sm bg-green-50/50 border-l border-green-100 text-green-900">
-                                                    {(() => {
-                                                        const q1 = (row.monthlyData[3]?.actual || 0) + (row.monthlyData[4]?.actual || 0) + (row.monthlyData[5]?.actual || 0);
-                                                        return (isThousands ? Math.floor(q1 / 1000) : q1).toLocaleString();
-                                                    })()}
+                                                {/* Quarterly Totals (calc-first) */}
+                                                <TableCell className="text-right font-bold text-sm bg-green-50/50 border-l border-green-100 text-green-900 px-2">
+                                                    {fmt(q1Val)}
                                                 </TableCell>
-                                                <TableCell className="text-right font-bold text-sm bg-green-50/50 border-green-100 text-green-900">
-                                                    {(() => {
-                                                        const q2 = (row.monthlyData[6]?.actual || 0) + (row.monthlyData[7]?.actual || 0) + (row.monthlyData[8]?.actual || 0);
-                                                        return (isThousands ? Math.floor(q2 / 1000) : q2).toLocaleString();
-                                                    })()}
+                                                <TableCell className="text-right font-bold text-sm bg-green-50/50 text-green-900 px-2">
+                                                    {fmt(q2Val)}
                                                 </TableCell>
-                                                <TableCell className="text-right font-bold text-sm bg-blue-50/50 border-l border-blue-100 text-blue-900">
-                                                    {(isThousands ? Math.floor(row.totalFirstHalf.actual / 1000) : row.totalFirstHalf.actual).toLocaleString()}
+                                                <TableCell className="text-right font-bold text-sm bg-blue-50/50 border-l border-blue-100 text-blue-900 px-2">
+                                                    {fmt(h1Val)}
                                                 </TableCell>
-                                                <TableCell className="text-right font-bold text-sm bg-orange-50/50 border-l border-orange-100 text-orange-900">
-                                                    {(() => {
-                                                        const q3 = (row.monthlyData[9]?.actual || 0) + (row.monthlyData[10]?.actual || 0) + (row.monthlyData[11]?.actual || 0);
-                                                        return (isThousands ? Math.floor(q3 / 1000) : q3).toLocaleString();
-                                                    })()}
+                                                <TableCell className="text-right font-bold text-sm bg-orange-50/50 border-l border-orange-100 text-orange-900 px-2">
+                                                    {fmt(q3Val)}
                                                 </TableCell>
-                                                <TableCell className="text-right font-bold text-sm bg-orange-50/50 border-orange-100 text-orange-900">
-                                                    {(() => {
-                                                        const q4 = (row.monthlyData[0]?.actual || 0) + (row.monthlyData[1]?.actual || 0) + (row.monthlyData[2]?.actual || 0);
-                                                        return (isThousands ? Math.floor(q4 / 1000) : q4).toLocaleString();
-                                                    })()}
+                                                <TableCell className="text-right font-bold text-sm bg-orange-50/50 text-orange-900 px-2">
+                                                    {fmt(q4Val)}
                                                 </TableCell>
-                                                <TableCell className="text-right font-bold text-sm bg-blue-50/50 border-l border-blue-100 text-blue-900">
-                                                    {(isThousands ? Math.floor(row.totalSecondHalf.actual / 1000) : row.totalSecondHalf.actual).toLocaleString()}
+                                                <TableCell className="text-right font-bold text-sm bg-blue-50/50 border-l border-blue-100 text-blue-900 px-2">
+                                                    {fmt(h2Val)}
                                                 </TableCell>
-                                                <TableCell className="text-right font-bold text-sm bg-slate-100/50 border-l text-slate-900">
-                                                    {(isThousands ? Math.floor(row.totalAnnual.actual / 1000) : row.totalAnnual.actual).toLocaleString()}
+                                                <TableCell className="text-right font-bold text-sm bg-slate-100/50 border-l text-slate-900 px-2">
+                                                    {fmt(fyVal)}
                                                 </TableCell>
 
-                                                {/* Variance */}
-                                                <TableCell className="text-right">
-                                                    {row.totalAnnual.budget !== 0 && (
-                                                        <span className={`text-xs font-bold ${variancePercent > 0 ? "text-red-500" : "text-green-600"}`}>
-                                                            {variancePercent.toFixed(1)}%
+                                                <TableCell className="text-right px-2">
+                                                    {budFY !== 0 && (
+                                                        <span className={`text-xs font-bold ${varPct > 0 ? "text-red-500" : "text-green-600"}`}>
+                                                            {varPct.toFixed(1)}%
                                                         </span>
                                                     )}
                                                 </TableCell>

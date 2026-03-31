@@ -30,10 +30,11 @@ const CATEGORY_LABELS: Record<string, string> = {
 export function DeptRatioTable({ data, selectedDepartment, companyName, fiscalYear }: DeptRatioTableProps) {
     const [employeeCounts, setEmployeeCounts] = useState<Record<string, DeptHeadcount>>({});
 
-    // Load employee counts
+    // Load employee counts (async SQL)
     useEffect(() => {
-        const counts = getAllEmployeeCounts(companyName, fiscalYear);
-        setEmployeeCounts(counts);
+        getAllEmployeeCounts(companyName, fiscalYear).then(counts => {
+            setEmployeeCounts(counts);
+        });
     }, [companyName, fiscalYear]);
 
     // Filter departments (exclude core sheets and specific departments)
