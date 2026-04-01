@@ -57,22 +57,35 @@ const findValue = (
         if (trace) trace.push(`${row.subject} (${row.code || 'NoCode'}): ${val.toLocaleString()}`);
     };
 
+    // 専用P/Lシート（損益計算書）が存在する場合はそれを優先使用（P/Lタブと同じソース）
+    const hasDedicatedPLSheet = data.rows.some(r =>
+        r.department.includes('損益計算書') || r.department.includes('販売費及び一般管理費')
+    );
+
     const filteredRows = data.rows.filter(r => {
         if (targetDepts.length > 0) {
             return targetDepts.some(d => r.department.includes(d));
         }
 
+        if (isStock) return r.department.includes('貸借対照表') || r.department.includes('B/S');
+
+        // 損益計算書シートがある場合はそれだけを使用（合併シートによる除外を防ぐ）
+        if (hasDedicatedPLSheet) {
+            return r.department.includes('損益計算書') || r.department.includes('販売費及び一般管理費') ||
+                   r.department.includes('製造原価');
+        }
+
+        // 損益計算書シートがない場合は従来の合併優先ロジック
         const hasConsolidated = consolidatedSubjects ? consolidatedSubjects.has(r.subject) : false;
         if (hasConsolidated) {
             return r.department.includes('合併') || r.department.includes('連結');
         }
 
         if (isSummaryDept(r.department)) return false;
-        if (isStock) return r.department.includes('貸借対照表') || r.department.includes('B/S');
-        
+
         const dept = r.department.toLowerCase();
         return dept.includes('損益') || dept.includes('p&l') || dept.includes('p/l') ||
-               dept.includes('製造原価') || dept.includes('合併') || dept.includes('一覧表') || 
+               dept.includes('製造原価') || dept.includes('合併') || dept.includes('一覧表') ||
                dept.includes('事業部') || dept.includes('合計') || dept.includes('営業所');
     });
 
@@ -84,7 +97,7 @@ const findValue = (
     const getValue = (r: AggregatedRow, m: number) => {
         if (useBudget) return r.monthlyData[m]?.budget || 0;
         if (usePrevYear) return r.monthlyData[m]?.prevYearActual || 0;
-        return r.monthlyData[m]?.actual || r.monthlyData[m]?.budget || 0;
+        return r.monthlyData[m]?.actual ?? 0;
     };
 
     if (matchingRows.length > 0) {
@@ -677,7 +690,7 @@ export const analyzeFinancials = (data: PnLData): FinancialReport => {
     let globalLatestMonth = 3;
     let monthsProcessed = 0;
     for (let m of FISCAL_MONTHS) {
-        if (data.rows.some(r => (r.monthlyData[m]?.actual || r.monthlyData[m]?.budget) !== 0)) {
+        if (data.rows.some(r => (r.monthlyData[m]?.actual ?? 0) !== 0)) {
             globalLatestMonth = m;
             monthsProcessed++;
         }

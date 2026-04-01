@@ -11,12 +11,13 @@ import { parseExcelFile } from '@/lib/excel-parser';
 import { MonthlyRecord } from '@/lib/types';
 
 interface FileUploadProps {
-    onDataLoaded: (monthUpdate: number | Record<number, MonthlyRecord[]>, data?: MonthlyRecord[]) => void;
+    onDataLoaded: (monthUpdate: number | Record<number, MonthlyRecord[]>, data?: MonthlyRecord[]) => Promise<void> | void;
     loadedMonths: number[];
+    budgetOnlyMonths?: number[];
     onReset: () => void;
 }
 
-export function FileUpload({ onDataLoaded, loadedMonths, onReset }: FileUploadProps) {
+export function FileUpload({ onDataLoaded, loadedMonths, budgetOnlyMonths = [], onReset }: FileUploadProps) {
     const [loading, setLoading] = useState(false);
     const [month, setMonth] = useState<string>("");
     const [isBudgetMode, setIsBudgetMode] = useState(false);
@@ -34,8 +35,22 @@ export function FileUpload({ onDataLoaded, loadedMonths, onReset }: FileUploadPr
             const file = files[i];
 
             try {
-                console.log(`[FileUpload] Processing file: ${file.name} (BudgetMode: ${isBudgetMode})`);
-                const records = await parseExcelFile(file, isBudgetMode);
+                // ── ファイル名から月を先に検出し、パーサーに渡す ──────────────
+                const normalizedFileNameEarly = file.name.normalize('NFKC');
+                let earlyMonthIndex = -1;
+                const jpMatchEarly = normalizedFileNameEarly.match(/(\d{1,2})月/);
+                const engMatchEarly = normalizedFileNameEarly.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
+                if (jpMatchEarly) {
+                    const m = parseInt(jpMatchEarly[1]);
+                    if (m >= 1 && m <= 12) earlyMonthIndex = m - 1;
+                } else if (engMatchEarly) {
+                    const map: Record<string, number> = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+                    earlyMonthIndex = map[engMatchEarly[1].toLowerCase().substring(0, 3)];
+                }
+                if (earlyMonthIndex === -1 && month && month !== "auto") earlyMonthIndex = parseInt(month);
+
+                console.log(`[FileUpload] Processing file: ${file.name} (BudgetMode: ${isBudgetMode}, 検出月: ${earlyMonthIndex + 1 || '?'})`);
+                const records = await parseExcelFile(file, isBudgetMode, earlyMonthIndex);
                 console.log(`[FileUpload] Parsed ${records.length} records from ${file.name}`);
 
                 // 1. If in Budget Mode, the parser takes care of everything (multiple months)
@@ -54,39 +69,8 @@ export function FileUpload({ onDataLoaded, loadedMonths, onReset }: FileUploadPr
                     continue;
                 }
 
-                // 2. Try to detect month from filename for standard files
-                const normalizedFileName = file.name.normalize('NFKC');
-                let detectedMonthIndex = -1;
-                // ... (rest of the month detection logic)
-
-                const jpMatch = normalizedFileName.match(/(\d{1,2})月/);
-                const engMatch = normalizedFileName.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
-
-                if (jpMatch) {
-                    const m = parseInt(jpMatch[1]);
-                    if (m >= 1 && m <= 12) {
-                        detectedMonthIndex = m - 1;
-                    }
-                } else if (engMatch) {
-                    const map: Record<string, number> = {
-                        'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5,
-                        'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'nov': 10, 'dec': 11
-                    };
-                    detectedMonthIndex = map[engMatch[1].toLowerCase().substring(0, 3)];
-                } else {
-                    // Try to catch formats like "3.16" or "R8.3.16"
-                    const dotMatch = normalizedFileName.match(/\.(\d{1,2})\./);
-                    if (dotMatch) {
-                        const m = parseInt(dotMatch[1]);
-                        if (m >= 1 && m <= 12) detectedMonthIndex = m - 1;
-                    }
-                }
-
-                // Fallback: manual selection
-                if (detectedMonthIndex === -1 && month && month !== "auto") {
-                    detectedMonthIndex = parseInt(month);
-                }
-
+                // ファイル名月はすでに earlyMonthIndex で検出済み
+                const detectedMonthIndex = earlyMonthIndex;
                 console.log(`[FileUpload] Detected month index: ${detectedMonthIndex}`);
 
                 // Group records by month index
@@ -106,16 +90,23 @@ export function FileUpload({ onDataLoaded, loadedMonths, onReset }: FileUploadPr
                 const monthKeys = Object.keys(recordsByMonth);
                 if (monthKeys.length === 0) {
                     console.error(`[FileUpload] Failed to assign records to any month for ${file.name}`);
-                    alert(`Could not detect month for "${file.name}". Please rename it to include something like "4月" or select a month manually.`);
+                    alert(`月を検出できませんでした。ファイル名に「5月」などを含めるか、手動で月を選択してください。`);
                     errorCount++;
                     continue;
                 }
 
-                // Dispatch to parent
-                Object.entries(recordsByMonth).forEach(([mIdx, data]) => {
-                    console.log(`[FileUpload] Dispatching ${data.length} records for month ${parseInt(mIdx) + 1}`);
-                    onDataLoaded(parseInt(mIdx), data);
-                });
+                // 月次モード: ファイル名で検出した特定の月だけを保存（他の月列は無視）
+                // → 5月ファイルを上げても4月・6月のデータを上書きしない
+                const monthsToDispatch = detectedMonthIndex !== -1
+                    ? [detectedMonthIndex]          // ファイル名から月が特定できた場合はその月のみ
+                    : monthKeys.map(Number);        // 特定できない場合は全月（後方互換）
+
+                for (const mIdx of monthsToDispatch) {
+                    const data = recordsByMonth[mIdx];
+                    if (!data || data.length === 0) continue;
+                    console.log(`[FileUpload] ${mIdx + 1}月を保存 (${data.length}件)`);
+                    await onDataLoaded(mIdx, data);
+                }
 
                 processedCount++;
             } catch (error: any) {
@@ -134,118 +125,127 @@ export function FileUpload({ onDataLoaded, loadedMonths, onReset }: FileUploadPr
     };
 
     return (
-        <Card className="p-6 w-full max-w-md mx-auto space-y-4">
-            <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                    <h3 className="font-bold text-lg text-slate-800">Upload Data</h3>
-                    <Button
-                        variant={isBudgetMode ? "default" : "outline"}
-                        onClick={() => setIsBudgetMode(!isBudgetMode)}
-                        className={`text-xs h-8 px-4 font-bold transition-all ${isBudgetMode ? 'bg-amber-500 hover:bg-amber-600 shadow-lg shadow-amber-100' : ''}`}
-                    >
-                        {isBudgetMode ? "★ 予算入力モード" : "予算入力モード"}
-                    </Button>
-                </div>
-
-                {isBudgetMode && (
-                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800 animate-in fade-in duration-300">
-                        <p className="font-bold flex items-center gap-1.5 mb-1">
-                            ⚠️ 予算アップロードの重要事項:
-                        </p>
-                        <p className="text-xs leading-relaxed">
-                            ファイル名は「<b>西暦で○○○年会社名予算書</b>」にしてください。<br />
-                            (例: 2026年シンコー予算書.xlsx)
-                        </p>
-                    </div>
-                )}
+        <Card className="p-5 w-full space-y-4 border-none shadow-md bg-white">
+            {/* ── モード切り替えタブ ── */}
+            <div className="flex bg-slate-100 p-1 rounded-lg">
+                <button
+                    onClick={() => setIsBudgetMode(false)}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${
+                        !isBudgetMode ? 'bg-white shadow-sm text-slate-800' : 'text-slate-400 hover:text-slate-600'
+                    }`}
+                >
+                    月次実績アップロード
+                </button>
+                <button
+                    onClick={() => setIsBudgetMode(true)}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${
+                        isBudgetMode ? 'bg-amber-400 shadow-sm text-white' : 'text-slate-400 hover:text-slate-600'
+                    }`}
+                >
+                    予算書アップロード
+                </button>
             </div>
 
+            {/* ── 月次モードの説明 ── */}
             {!isBudgetMode && (
-                <div className="space-y-2">
-                    <Label className="text-slate-500 text-[11px] font-bold uppercase tracking-wider">Manual Month Selection</Label>
-                    <Select onValueChange={setMonth} value={month}>
-                        <SelectTrigger className="w-full bg-slate-50 border-slate-200">
-                            <SelectValue placeholder="Auto-detect from Filename" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            <SelectItem value="auto">Auto-detect from Filename</SelectItem>
-                            {[3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2].map((m) => (
-                                <SelectItem key={m} value={m.toString()}>
-                                    <span className="font-medium mr-2">{m + 1}月</span>
-                                    <span className="text-gray-400 text-xs">
-                                        ({new Date(0, m).toLocaleString('en-US', { month: 'short' })})
-                                    </span>
-                                </SelectItem>
-                            ))}
-                        </SelectContent>
-                    </Select>
+                <div className="space-y-3">
+                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                        月次実績ファイルをドロップしてください。<br />
+                        ファイル名に「5月」などを含めると月が自動判定されます。<br />
+                        <span className="font-semibold text-indigo-600">同じ月を再アップロードすると自動的に上書きされます。</span>
+                    </p>
+                    <div className="space-y-1">
+                        <Label className="text-slate-400 text-[10px] font-bold uppercase tracking-wider">月を手動指定（自動判定できない場合）</Label>
+                        <Select onValueChange={setMonth} value={month}>
+                            <SelectTrigger className="h-9 bg-slate-50 border-slate-200 text-sm">
+                                <SelectValue placeholder="ファイル名から自動検出" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="auto">ファイル名から自動検出</SelectItem>
+                                {[3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2].map((m) => (
+                                    <SelectItem key={m} value={m.toString()}>
+                                        {m + 1}月
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    </div>
                 </div>
             )}
 
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:bg-gray-50 transition cursor-pointer relative h-32 flex items-center justify-center">
+            {/* ── 予算モードの説明 ── */}
+            {isBudgetMode && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 space-y-1">
+                    <p className="font-bold">予算書アップロード（年1回）</p>
+                    <p className="leading-relaxed">
+                        全シートの12ヶ月分予算が一括で取り込まれます。<br />
+                        既存の予算データは上書きされます。
+                    </p>
+                </div>
+            )}
+
+            {/* ── ドロップエリア ── */}
+            <div className={`border-2 border-dashed rounded-lg p-5 text-center transition cursor-pointer relative flex items-center justify-center h-28 ${
+                isBudgetMode ? 'border-amber-300 hover:bg-amber-50' : 'border-indigo-200 hover:bg-indigo-50'
+            }`}>
                 <Input
                     type="file"
                     accept=".xlsx, .xls"
-                    multiple // Enable multiple files
+                    multiple
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                     onChange={handleFileChange}
                     disabled={loading}
                 />
                 {loading ? (
-                    <div className="flex flex-col items-center">
-                        <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
-                        <p className="mt-2 text-sm text-gray-500">Processing files...</p>
+                    <div className="flex flex-col items-center text-slate-500">
+                        <Loader2 className="h-7 w-7 animate-spin text-indigo-400 mb-2" />
+                        <p className="text-xs">保存中...</p>
                     </div>
                 ) : (
-                    <div className="flex flex-col items-center text-gray-500">
-                        <Upload className="h-8 w-8 mb-2" />
-                        <p className="text-sm">
-                            Drag & Drop files here (e.g. "Data_4月.xlsx")
+                    <div className="flex flex-col items-center text-slate-400">
+                        <Upload className={`h-7 w-7 mb-2 ${isBudgetMode ? 'text-amber-400' : 'text-indigo-400'}`} />
+                        <p className="text-xs font-medium">
+                            {isBudgetMode ? '予算書をここにドロップ' : '月次ファイルをここにドロップ'}
                         </p>
-                        <p className="text-xs text-gray-400 mt-1">
-                            Use "4月" in filename for auto-detection
-                        </p>
+                        <p className="text-[10px] mt-1">または クリックして選択</p>
                     </div>
                 )}
             </div>
-            {loadedMonths.length > 0 && (
-                <div className="pt-4 border-t border-gray-100 space-y-3">
+
+            {/* ── 入力済み月の状況 ── */}
+            {(loadedMonths.length > 0 || budgetOnlyMonths.length > 0) && (
+                <div className="pt-3 border-t border-slate-100 space-y-2">
                     <div className="flex justify-between items-center">
-                        <h4 className="text-sm font-semibold text-gray-700">Loaded Data:</h4>
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={onReset}
-                            className="text-xs text-red-500 hover:text-red-600 h-7"
-                        >
-                            Clear All
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">入力状況</span>
+                        <Button variant="ghost" size="sm" onClick={onReset}
+                            className="text-[10px] text-red-400 hover:text-red-500 h-6 px-2">
+                            全クリア
                         </Button>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-1.5">
                         {[3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2].map(m => {
-                            const isLoaded = loadedMonths.includes(m);
+                            const hasActual = loadedMonths.includes(m);
+                            const budgetOnly = budgetOnlyMonths.includes(m);
                             return (
-                                <div
-                                    key={m}
-                                    className={`px-2 py-1 rounded text-xs font-medium border ${isLoaded
-                                        ? "bg-green-50 border-green-200 text-green-700"
-                                        : "bg-gray-50 border-gray-100 text-gray-300"
-                                        }`}
+                                <div key={m}
+                                    title={hasActual ? '実績入力済み（再アップロードで上書き可）' : budgetOnly ? '予算のみ（実績未入力）' : '未入力'}
+                                    className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
+                                        hasActual  ? 'bg-green-50 border-green-200 text-green-700'
+                                        : budgetOnly ? 'bg-blue-50 border-blue-200 text-blue-500'
+                                        : 'bg-gray-50 border-gray-100 text-gray-300'
+                                    }`}
                                 >
                                     {m + 1}月
                                 </div>
                             );
                         })}
                     </div>
-                    <p className="text-[10px] text-gray-400 italic">
-                        Upload additional files to add more months.
-                    </p>
+                    <div className="flex gap-3 text-[9px] text-gray-400">
+                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-green-200 inline-block" />実績済み（上書き可）</span>
+                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-blue-200 inline-block" />予算のみ</span>
+                    </div>
                 </div>
             )}
-
-            <p className="text-xs text-gray-400 text-center">
-                *Sheet Names = Departments.
-            </p>
         </Card>
     );
 }

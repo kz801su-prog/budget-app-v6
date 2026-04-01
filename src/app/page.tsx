@@ -75,6 +75,13 @@ export default function Home() {
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── ログイン後にデータを再ロード（SQLから確実に取得） ──────────
+  useEffect(() => {
+    if (currentUser && companyName && fiscalYear) {
+      loadProfileData(companyName, fiscalYear);
+    }
+  }, [currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── 財務データをSQLまたはlocalStorage(フォールバック)から取得 ─
   const normalizeLegacyDeptName = (name: string): string => {
     let clean = name.normalize('NFKC').trim();
@@ -225,24 +232,59 @@ export default function Home() {
         value:      dataType === 'actual' ? r.actual : r.budget,
       }));
 
+    // デッドロック対応: リトライ付きチャンク保存
+    const saveChunkWithRetry = async (params: Record<string, unknown>, maxRetries = 4) => {
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        const res = await callApi('save_financial_data', params);
+        if (res.success) return res;
+        const isDeadlock = res.message?.includes('1213') || res.message?.includes('Deadlock');
+        if (isDeadlock && attempt < maxRetries - 1) {
+          const wait = 600 * (attempt + 1);
+          console.warn(`[Deadlock] リトライ ${attempt + 1}/${maxRetries - 1} (${wait}ms 待機)`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        throw new Error(res.message || 'チャンク保存エラー');
+      }
+    };
+
     try {
       // 予算アップロード時は対象月の actual を 0 クリア
       if (dataType === 'budget') {
         const clearRecords = recordsToSave.map(r => ({ ...r, value: 0 }));
         for (let i = 0; i < clearRecords.length; i += CHUNK_SIZE) {
-          await callApi('save_financial_data', {
+          await saveChunkWithRetry({
             company: companyName, year: parseInt(fiscalYear),
             dataType: 'actual', records: clearRecords.slice(i, i + CHUNK_SIZE),
           });
         }
       }
 
+      // 実績アップロード時: 対象月の既存SQLデータを全クリアしてから新データを保存
+      // UPSERTだと旧レコードが残るため、まず既存レコードを value=0 でリセットする
+      if (dataType === 'actual') {
+        for (const m of Array.from(activeMonths)) {
+          const existingRecords = dataByMonth[m] || [];
+          if (existingRecords.length > 0) {
+            const clearRecords = existingRecords.map(r => ({
+              month: m, department: r.department, code: r.code, subject: r.subject, value: 0,
+            }));
+            console.log(`[Upload] ${m + 1}月の既存データ ${existingRecords.length}件をクリア`);
+            for (let i = 0; i < clearRecords.length; i += CHUNK_SIZE) {
+              await saveChunkWithRetry({
+                company: companyName, year: parseInt(fiscalYear),
+                dataType: 'actual', records: clearRecords.slice(i, i + CHUNK_SIZE),
+              });
+            }
+          }
+        }
+      }
+
       for (let i = 0; i < recordsToSave.length; i += CHUNK_SIZE) {
-        const res = await callApi('save_financial_data', {
+        await saveChunkWithRetry({
           company: companyName, year: parseInt(fiscalYear),
           dataType, records: recordsToSave.slice(i, i + CHUNK_SIZE),
         });
-        if (!res.success) throw new Error(res.message || 'チャンク保存エラー');
         console.log(`[SQL Save] ${Math.min(i + CHUNK_SIZE, recordsToSave.length)} / ${recordsToSave.length}`);
       }
 
@@ -296,6 +338,18 @@ export default function Home() {
 
   const hasData    = aggregatedData.rows.length > 0;
   const departments = ["All", ...aggregatedData.departments];
+
+  // 実績入力済み月（actual≠0）と予算のみ月（budget≠0 かつ actual=0）を分離
+  const actualLoadedMonths = useMemo(() =>
+    Object.keys(dataByMonth).filter(m =>
+      dataByMonth[parseInt(m)]?.some(r => r.actual !== 0)
+    ).map(Number), [dataByMonth]);
+
+  const budgetOnlyMonths = useMemo(() =>
+    Object.keys(dataByMonth).filter(m =>
+      !dataByMonth[parseInt(m)]?.some(r => r.actual !== 0) &&
+      dataByMonth[parseInt(m)]?.some(r => r.budget !== 0)
+    ).map(Number), [dataByMonth]);
 
   // ── Excel エクスポート ────────────────────────────────────
   const handleExport = () => {
@@ -516,7 +570,8 @@ export default function Home() {
 
             <FileUpload
               onDataLoaded={handleDataLoaded}
-              loadedMonths={Object.keys(dataByMonth).map(Number)}
+              loadedMonths={actualLoadedMonths}
+              budgetOnlyMonths={budgetOnlyMonths}
               onReset={() => { if (confirm("このプロファイルのデータをクリアしますか？")) setDataByMonth({}); }}
             />
 
@@ -543,7 +598,15 @@ export default function Home() {
           </div>
 
           <div className="lg:col-span-4">
-            {hasData ? (
+            {isLoadingStorage ? (
+              <Card className="h-96 flex items-center justify-center border-dashed">
+                <div className="text-center text-gray-400">
+                  <RefreshCw className="h-8 w-8 mx-auto mb-3 animate-spin text-indigo-400" />
+                  <p className="text-xl font-medium">データ読み込み中...</p>
+                  <p className="text-sm">SQLからデータを取得しています</p>
+                </div>
+              </Card>
+            ) : hasData ? (
               <Tabs
                 defaultValue="dashboard"
                 className="w-full"
