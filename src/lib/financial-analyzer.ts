@@ -97,6 +97,8 @@ const findValue = (
     const getValue = (r: AggregatedRow, m: number) => {
         if (useBudget) return r.monthlyData[m]?.budget || 0;
         if (usePrevYear) return r.monthlyData[m]?.prevYearActual || 0;
+        // BS（貸借対照表）は actual がない月は budget にフォールバック
+        if (isStock) return r.monthlyData[m]?.actual || r.monthlyData[m]?.budget || 0;
         return r.monthlyData[m]?.actual ?? 0;
     };
 
@@ -690,7 +692,7 @@ export const analyzeFinancials = (data: PnLData): FinancialReport => {
     let globalLatestMonth = 3;
     let monthsProcessed = 0;
     for (let m of FISCAL_MONTHS) {
-        if (data.rows.some(r => (r.monthlyData[m]?.actual ?? 0) !== 0)) {
+        if (data.rows.some(r => (r.monthlyData[m]?.actual || r.monthlyData[m]?.budget || 0) !== 0)) {
             globalLatestMonth = m;
             monthsProcessed++;
         }

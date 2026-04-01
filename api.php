@@ -42,10 +42,13 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS financial_data (
     subject_name VARCHAR(255),
     budget DECIMAL(15,2) DEFAULT 0,
     actual DECIMAL(15,2) DEFAULT 0,
+    prev_year_actual DECIMAL(15,2) DEFAULT 0,
     calc_result DECIMAL(15,2) DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uni_idx (company_name, fiscal_year, month_index, department, subject_code, subject_name)
 )");
+// 既存テーブルへのカラム追加（初回のみ実行、既存なら無視）
+try { $pdo->exec("ALTER TABLE financial_data ADD COLUMN prev_year_actual DECIMAL(15,2) DEFAULT 0 AFTER actual"); } catch (Exception $e) { /* already exists */ }
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS account_master (
     code VARCHAR(50) PRIMARY KEY,
@@ -85,16 +88,23 @@ switch ($action) {
         $records = $data['records']  ?? [];
         $type    = $data['dataType'] ?? 'actual';
 
+        // 許可するカラム名のホワイトリスト（SQLインジェクション対策）
+        $allowed = ['actual', 'budget', 'prev_year_actual'];
+        if (!in_array($type, $allowed, true)) {
+            echo json_encode(['success' => false, 'message' => '不正なdataType']);
+            exit;
+        }
+
         if (!$company || !$year || empty($records)) {
             echo json_encode(['success' => false, 'message' => 'パラメータ不足']);
             exit;
         }
 
         $stmt = $pdo->prepare("INSERT INTO financial_data
-            (company_name, fiscal_year, month_index, department, subject_code, subject_name, $type, calc_result)
+            (company_name, fiscal_year, month_index, department, subject_code, subject_name, `$type`, calc_result)
             VALUES (?, ?, ?, ?, ?, ?, ?, 0)
             ON DUPLICATE KEY UPDATE
-            $type = VALUES($type),
+            `$type` = VALUES(`$type`),
             calc_result = actual - budget");
 
         $stmtMaster = $pdo->prepare("INSERT INTO account_master (code, name) VALUES (?, ?)
@@ -266,12 +276,13 @@ switch ($action) {
                 $m = (int)$r['month_index'];
                 if (!isset($dataByMonth[$m])) $dataByMonth[$m] = [];
                 $dataByMonth[$m][] = [
-                    'code'       => $r['subject_code'],
-                    'subject'    => $r['subject_name'],
-                    'department' => $r['department'],
-                    'actual'     => (float)$r['actual'],
-                    'budget'     => (float)$r['budget'],
-                    'monthIndex' => $m,
+                    'code'           => $r['subject_code'],
+                    'subject'        => $r['subject_name'],
+                    'department'     => $r['department'],
+                    'actual'         => (float)$r['actual'],
+                    'budget'         => (float)$r['budget'],
+                    'prevYearActual' => (float)($r['prev_year_actual'] ?? 0),
+                    'monthIndex'     => $m,
                 ];
             }
 

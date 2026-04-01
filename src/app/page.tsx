@@ -100,20 +100,20 @@ export default function Home() {
           const mIdx = parseInt(row.month_index);
           if (!newData[mIdx]) newData[mIdx] = [];
           newData[mIdx].push({
-            code:       row.subject_code,
-            subject:    row.subject_name,
-            department: row.department,
-            actual:     parseFloat(row.actual || 0),
-            budget:     parseFloat(row.budget || 0),
-            prevYearActual: 0,
-            monthIndex: mIdx,
+            code:           row.subject_code,
+            subject:        row.subject_name,
+            department:     row.department,
+            actual:         parseFloat(row.actual          || 0),
+            budget:         parseFloat(row.budget          || 0),
+            prevYearActual: parseFloat(row.prev_year_actual || 0),
+            monthIndex:     mIdx,
           });
         });
         // actual も budget も全て 0 の月はアップロード済みとみなさない
         // (予算 pre-clear の副産物などを除外)
         Object.keys(newData).forEach(mStr => {
           const m = parseInt(mStr);
-          const hasValue = newData[m].some(r => r.actual !== 0 || r.budget !== 0);
+          const hasValue = newData[m].some(r => r.actual !== 0 || r.budget !== 0 || (r.prevYearActual ?? 0) !== 0);
           if (!hasValue) delete newData[m];
         });
         console.log(`[Data Fetch] SQL → ${comp} FY${y}, 有効月: ${Object.keys(newData).join(',')}`);
@@ -201,36 +201,23 @@ export default function Home() {
       ? (records || [])
       : Object.values(dataUpdate).flat();
 
-    const hasActual = allRecords.some(r => r.actual !== 0);
-    const dataType  = hasActual ? 'actual' : 'budget';
+    // ── 3種類のデータに分離 ────────────────────────────────────
+    const actualRecs   = allRecords.filter(r => r.actual !== 0);
+    const budgetRecs   = allRecords.filter(r => r.budget !== 0);
+    const prevYearRecs = allRecords.filter(r => (r.prevYearActual ?? 0) !== 0);
 
-    // ── 値が1件以上存在する月だけを保存対象にする ──────────────
-    // Excel は12ヶ月全列を持つため、空列（全0）の月も記録に含まれてしまう。
-    // アップロード対象外の月を上書きしないよう、非ゼロ値が存在する月のみ対象とする。
-    const activeMonths = new Set<number>();
-    allRecords.forEach(r => {
-      const val = dataType === 'actual' ? r.actual : r.budget;
-      if (val !== 0) activeMonths.add(r.monthIndex ?? 0);
-    });
+    const activeActualMonths   = new Set(actualRecs.map(r => r.monthIndex ?? 0));
+    const activeBudgetMonths   = new Set(budgetRecs.map(r => r.monthIndex ?? 0));
+    const activePrevYearMonths = new Set(prevYearRecs.map(r => r.monthIndex ?? 0));
 
-    if (activeMonths.size === 0) {
+    if (activeActualMonths.size === 0 && activeBudgetMonths.size === 0 && activePrevYearMonths.size === 0) {
       alert("アップロードファイルに有効なデータが見つかりません。");
       return;
     }
 
-    console.log(`[Upload] 保存対象月: ${Array.from(activeMonths).sort((a,b)=>a-b).join(', ')}`);
+    console.log(`[Upload] actual月: ${[...activeActualMonths].sort((a,b)=>a-b).map(m=>m+1).join(',')}  budget月: ${[...activeBudgetMonths].sort((a,b)=>a-b).map(m=>m+1).join(',')}  前年月: ${[...activePrevYearMonths].sort((a,b)=>a-b).map(m=>m+1).join(',')}`);
 
     const CHUNK_SIZE = 1000;
-    // 値が存在する月のレコードだけに絞る（0値行も同月の他行が非0なら含む）
-    const recordsToSave = allRecords
-      .filter(r => activeMonths.has(r.monthIndex ?? 0))
-      .map(r => ({
-        month:      r.monthIndex,
-        department: r.department,
-        code:       r.code,
-        subject:    r.subject,
-        value:      dataType === 'actual' ? r.actual : r.budget,
-      }));
 
     // デッドロック対応: リトライ付きチャンク保存
     const saveChunkWithRetry = async (params: Record<string, unknown>, maxRetries = 4) => {
@@ -248,49 +235,44 @@ export default function Home() {
       }
     };
 
-    try {
-      // 予算アップロード時は対象月の actual を 0 クリア
-      if (dataType === 'budget') {
-        const clearRecords = recordsToSave.map(r => ({ ...r, value: 0 }));
-        for (let i = 0; i < clearRecords.length; i += CHUNK_SIZE) {
-          await saveChunkWithRetry({
-            company: companyName, year: parseInt(fiscalYear),
-            dataType: 'actual', records: clearRecords.slice(i, i + CHUNK_SIZE),
-          });
-        }
-      }
+    const toApiRecords = (recs: MonthlyRecord[], getValue: (r: MonthlyRecord) => number) =>
+      recs.map(r => ({ month: r.monthIndex, department: r.department, code: r.code, subject: r.subject, value: getValue(r) }));
 
-      // 実績アップロード時: 対象月の既存SQLデータを全クリアしてから新データを保存
-      // UPSERTだと旧レコードが残るため、まず既存レコードを value=0 でリセットする
-      if (dataType === 'actual') {
-        for (const m of Array.from(activeMonths)) {
-          const existingRecords = dataByMonth[m] || [];
-          if (existingRecords.length > 0) {
-            const clearRecords = existingRecords.map(r => ({
-              month: m, department: r.department, code: r.code, subject: r.subject, value: 0,
-            }));
-            console.log(`[Upload] ${m + 1}月の既存データ ${existingRecords.length}件をクリア`);
-            for (let i = 0; i < clearRecords.length; i += CHUNK_SIZE) {
-              await saveChunkWithRetry({
-                company: companyName, year: parseInt(fiscalYear),
-                dataType: 'actual', records: clearRecords.slice(i, i + CHUNK_SIZE),
-              });
-            }
+    const saveInChunks = async (apiRecs: ReturnType<typeof toApiRecords>, dataType: string) => {
+      for (let i = 0; i < apiRecs.length; i += CHUNK_SIZE) {
+        await saveChunkWithRetry({ company: companyName, year: parseInt(fiscalYear), dataType, records: apiRecs.slice(i, i + CHUNK_SIZE) });
+      }
+      console.log(`✅ ${dataType} saved (${apiRecs.length} records)`);
+    };
+
+    try {
+      // 1. 実績を保存（既存の同月データを先にクリア）
+      if (activeActualMonths.size > 0) {
+        for (const m of Array.from(activeActualMonths)) {
+          const existing = dataByMonth[m] || [];
+          if (existing.length > 0) {
+            const clears = existing.map(r => ({ month: m, department: r.department, code: r.code, subject: r.subject, value: 0 }));
+            await saveInChunks(clears, 'actual');
           }
         }
+        await saveInChunks(toApiRecords(actualRecs, r => r.actual), 'actual');
       }
 
-      for (let i = 0; i < recordsToSave.length; i += CHUNK_SIZE) {
-        await saveChunkWithRetry({
-          company: companyName, year: parseInt(fiscalYear),
-          dataType, records: recordsToSave.slice(i, i + CHUNK_SIZE),
-        });
-        console.log(`[SQL Save] ${Math.min(i + CHUNK_SIZE, recordsToSave.length)} / ${recordsToSave.length}`);
+      // 2. 予算を保存（対象月の actual を先にクリア）
+      if (activeBudgetMonths.size > 0) {
+        const clearActuals = toApiRecords(
+          allRecords.filter(r => activeBudgetMonths.has(r.monthIndex ?? 0)),
+          () => 0
+        );
+        await saveInChunks(clearActuals, 'actual');
+        await saveInChunks(toApiRecords(budgetRecs, r => r.budget), 'budget');
       }
 
-      console.log(`✅ ${dataType} saved (${recordsToSave.length} records)`);
+      // 3. 前年実績を保存
+      if (activePrevYearMonths.size > 0) {
+        await saveInChunks(toApiRecords(prevYearRecs, r => r.prevYearActual ?? 0), 'prev_year_actual');
+      }
 
-      // プロフィール一覧を更新
       await loadProfiles();
       await loadProfileData(companyName, fiscalYear);
     } catch (e: any) {

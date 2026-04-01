@@ -43,58 +43,48 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
     const fiscalMonths = [3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2];
 
     // 月ヘッダーから月番号（1〜12）を抽出する関数
-    // 「4月」「4月実績」「4」「Apr」「Excelシリアル値」→ 4 を返す。不明なら null
     const extractMonthNum = (val: string): number | null => {
         const normalized = val.trim().normalize('NFKC');
-
-        // "4月", "4月実績", "4月予算", "04月" etc.
-        const jpMatch = normalized.match(/^(\d{1,2})月/);
-        if (jpMatch) {
-            const m = parseInt(jpMatch[1]);
-            if (m >= 1 && m <= 12) return m;
-        }
-
-        // 1〜12 の数字のみ（半角・全角・ゼロ埋め対応）
-        const numMatch = normalized.match(/^[0０]?([1-9１-９]|1[0-2１-２])\s*$/);
-        if (numMatch) {
-            const m = parseInt(numMatch[1].replace(/[０-９]/g, c => String(c.charCodeAt(0) - 0xFF10)));
-            if (m >= 1 && m <= 12) return m;
-        }
 
         // Excelの日付シリアル値（5桁の数値、例: 45383 = 2024年4月1日）
         if (/^\d{5}$/.test(normalized)) {
             const serial = parseInt(normalized);
-            // Excel serial → JS Date（Excelエポック: 1900-01-01 = 1）
             const date = new Date(Math.round((serial - 25569) * 86400000));
             const m = date.getUTCMonth() + 1;
             if (m >= 1 && m <= 12) return m;
         }
 
         // ISO日付文字列 "2024-04-01" or "2024/04/01"
-        const isoMatch = normalized.match(/^\d{4}[-/](\d{1,2})[-/]\d{1,2}/);
+        const isoMatch = normalized.match(/\d{4}[-/](\d{1,2})[-/]\d{1,2}/);
         if (isoMatch) {
             const m = parseInt(isoMatch[1]);
             if (m >= 1 && m <= 12) return m;
         }
 
-        // JSのDateオブジェクトをString()したもの "Mon Apr 01 2024 ..."
-        const jsDateMatch = normalized.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i);
-        if (jsDateMatch) {
+        // "4月", "令和7年4月", "2024年4月" など — 文字列中の X月 を抽出（行頭不要）
+        const jpMatch = normalized.match(/(\d{1,2})月/);
+        if (jpMatch) {
+            const m = parseInt(jpMatch[1]);
+            if (m >= 1 && m <= 12) return m;
+        }
+
+        // 1〜12 の数字のみ（単体セル、全角対応）
+        const numMatch = normalized.match(/^[0０]?([1-9１-９]|1[0-2１-２])\s*$/);
+        if (numMatch) {
+            const m = parseInt(numMatch[1].replace(/[０-９]/g, c => String(c.charCodeAt(0) - 0xFF10)));
+            if (m >= 1 && m <= 12) return m;
+        }
+
+        // 英語月名 "Apr", "April", "Mon Apr 01 2024 ..."
+        const engMonthMatch = normalized.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*/i);
+        if (engMonthMatch) {
             const engMap: Record<string, number> = {
                 jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
                 jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
             };
-            const m = engMap[jsDateMatch[1].toLowerCase()];
+            const m = engMap[engMonthMatch[1].toLowerCase().substring(0, 3)];
             if (m) return m;
         }
-
-        // 英語月名
-        const engMap: Record<string, number> = {
-            apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9,
-            oct: 10, nov: 11, dec: 12, jan: 1, feb: 2, mar: 3
-        };
-        const key = normalized.toLowerCase().substring(0, 3);
-        if (engMap[key]) return engMap[key];
 
         return null;
     };
@@ -113,7 +103,11 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
 
             if (!jsonData || jsonData.length < 3) continue;
 
-            console.log(`[Parser] Processing Sheet: "${sheetName}" -> Normalized Dept: "${deptName}"`);
+            // シート名に「昨年」「前年」が含まれる場合は prevYearActual として保存
+            const normalizedSheetName = sheetName.normalize('NFKC');
+            const isPrevYear = normalizedSheetName.includes('昨年') || normalizedSheetName.includes('前年');
+
+            console.log(`[Parser] Processing Sheet: "${sheetName}" -> Dept: "${deptName}" isPrevYear=${isPrevYear}`);
 
             // ヘッダー行を探す（最初の10行を走査）
             // 月番号をヘッダー値から厳格に読み取る（数値なら1〜12のみ）
@@ -164,9 +158,19 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
 
             // ── Strategy 1 (12ヶ月形式) が成功した場合 ──────────────────────────
             if (headerRowIndex !== -1) {
+                // コード列・科目列をヘッダー値から検索（固定オフセットでなく実際のラベルを優先）
+                const headerRow = jsonData[headerRowIndex] || [];
+                let codeColIdx    = -1;
+                let subjectColIdx = -1;
+                for (let col = 0; col < headerRow.length; col++) {
+                    const v = String(headerRow[col] ?? '').normalize('NFKC').trim();
+                    if (codeColIdx    === -1 && (v === 'コード' || v === '科目コード' || v === '勘定コード' || v === 'CD' || v === 'Code')) codeColIdx    = col;
+                    if (subjectColIdx === -1 && (v === '科目名' || v === '科目' || v === '勘定科目' || v === '項目'))                        subjectColIdx = col;
+                }
+                // ラベルで見つからない場合は月列の直前2列をフォールバック
                 const firstMonthCol = Math.min(...monthColMapping.map(m => m.colIdx));
-                const codeColIdx    = Math.max(0, firstMonthCol - 2);
-                const subjectColIdx = Math.max(1, firstMonthCol - 1);
+                if (codeColIdx    === -1) codeColIdx    = Math.max(0, firstMonthCol - 2);
+                if (subjectColIdx === -1) subjectColIdx = Math.max(0, firstMonthCol - 1);
                 console.log(`[Parser] ✓ Annual format. Code col=${codeColIdx}, Subject col=${subjectColIdx}`);
 
                 for (let r = headerRowIndex + 1; r < jsonData.length; r++) {
@@ -182,9 +186,9 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                         if (code !== "" || val !== 0 || (subject !== "" && !subject.startsWith(" "))) {
                             allRecords.push({
                                 code, subject, department: deptName,
-                                actual: isBudgetMode ? 0 : val,
-                                budget: isBudgetMode ? val : 0,
-                                prevYearActual: 0,
+                                actual:        isBudgetMode ? 0 : (isPrevYear ? 0 : val),
+                                budget:        isBudgetMode ? val : 0,
+                                prevYearActual: isPrevYear ? val : 0,
                                 monthIndex: mapping.monthIdx
                             });
                         }
@@ -193,14 +197,8 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                 continue; // 次のシートへ
             }
 
-            // ── Strategy 2: 単月形式（当月実績/当月予算/達成率… 縦断フォーマット）────
-            // 例: C3 = "令和7年4月現在  1ヶ月経過  1ヶ月分比較  単位：円"
-
-            // 2a. 月番号の決定:
-            //   ① ファイル名から渡された月（最も確実） → hintMonthIndex
-            //   ② シート内テキスト（X月現在 など）
-            let sheetMonthIdx = hintMonthIndex; // ファイル名の月を最優先
-
+            // ── 単月処理: まず月番号を確定 ────────────────────────────
+            let sheetMonthIdx = hintMonthIndex;
             if (sheetMonthIdx === -1) {
                 for (let r = 0; r < Math.min(jsonData.length, 8) && sheetMonthIdx === -1; r++) {
                     const row = jsonData[r];
@@ -215,9 +213,62 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                     }
                 }
             }
-            console.log(`[Parser] Strategy2 "${sheetName}": 月=${sheetMonthIdx + 1 || '?'}月 (hint=${hintMonthIndex + 1 || '?'})`);
 
-            // 2b. 列ヘッダー行を検索: 「当月実績」「実績」列を見つける
+            if (sheetMonthIdx === -1) {
+                console.log(`[Parser] Skipping "${sheetName}": 月番号不明（ファイル名に「4月」などを含めてください）`);
+                continue;
+            }
+
+            // ── Strategy 2: A列=コード, B列=科目, H列=当月値（固定フォーマット）────
+            // 「貸借対照表」「損益計算書」「販売費及び一般管理費」など
+            // A/B列にコード・科目が存在する場合はH列（index=7）を最優先で使用する
+            {
+                let abStartRow = -1;
+                for (let r = 0; r < Math.min(jsonData.length, 30); r++) {
+                    const row = jsonData[r];
+                    if (!row) continue;
+                    const a = String(row[0] ?? '').normalize('NFKC').trim();
+                    const b = String(row[1] ?? '').normalize('NFKC').trim();
+                    // ラベル行はスキップ
+                    if (['コード','科目コード','勘定コード','CD','Code','科目','科目名','勘定科目'].includes(a)) continue;
+                    // A列が空でなく、B列が科目名らしい文字列なら開始行とみなす
+                    if (a && b && b.length >= 2 && !/^\d+$/.test(b)) {
+                        abStartRow = r;
+                        break;
+                    }
+                }
+
+                if (abStartRow !== -1) {
+                    const VAL_COL = 7; // H列
+                    let hColHeader = '';
+                    for (let r = 0; r < abStartRow; r++) {
+                        const v = String((jsonData[r] ?? [])[VAL_COL] ?? '').normalize('NFKC').trim();
+                        if (v) { hColHeader = v; break; }
+                    }
+                    console.log(`[Parser] ✓ A/B/H形式 "${sheetName}": ${sheetMonthIdx + 1}月, startRow=${abStartRow + 1}, H列="${hColHeader}"`);
+
+                    for (let r = abStartRow; r < jsonData.length; r++) {
+                        const row = jsonData[r];
+                        if (!row || row.length < 2) continue;
+                        const code    = String(row[0] ?? '').trim();
+                        const subject = String(row[1] ?? '').trim();
+                        if (!subject || subject === '科目名' || subject === '科目') continue;
+                        if (subject.includes('合計') || subject.includes('小計') || subject.includes('損益勘定')) continue;
+
+                        const val = parseNumber(row[VAL_COL]);
+                        allRecords.push({
+                            code, subject, department: deptName,
+                            actual:         isBudgetMode ? 0 : (isPrevYear ? 0 : val),
+                            budget:         isBudgetMode ? val : 0,
+                            prevYearActual: isPrevYear ? val : 0,
+                            monthIndex:     sheetMonthIdx,
+                        });
+                    }
+                    continue;
+                }
+            }
+
+            // ── Strategy 3: 列ヘッダーから実績列を検索（A/B構成がないシート用）────
             let singleHeaderRow = -1;
             let actualColIdx    = -1;
             let budgetColIdx    = -1;
@@ -227,28 +278,25 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
             for (let r = 0; r < Math.min(jsonData.length, 10); r++) {
                 const row = jsonData[r];
                 if (!row) continue;
-
                 for (let col = 0; col < row.length; col++) {
                     const v = String(row[col] ?? "").normalize('NFKC').trim();
-                    if (v === "当月実績" || (v === "実績" && actualColIdx === -1))        actualColIdx  = col;
-                    if (v === "当月予算" || (v === "予算" && budgetColIdx === -1))        budgetColIdx  = col;
-                    if (v === "コード" || v === "科目コード" || v === "勘定コード")       codeColIdx    = col;
-                    if (v === "科目名" || v === "科目" || v === "勘定科目")               subjectColIdx = col;
-                    // 「実績」を含む最初の列（累計・前年を除く）
-                    if (actualColIdx === -1 && v.includes("実績") && !v.includes("累計") && !v.includes("前")) actualColIdx = col;
+                    if (v === "コード" || v === "科目コード" || v === "勘定コード") codeColIdx    = col;
+                    if (v === "科目名"  || v === "科目"     || v === "勘定科目")   subjectColIdx = col;
+                    if (actualColIdx === -1 && (v === "当月実績" || v === "実績" || v === "当月" || v === "当月末" || v === "残高" || v === "金額")) actualColIdx = col;
+                    if (budgetColIdx === -1 && (v === "当月予算" || v === "予算")) budgetColIdx = col;
+                    if (isPrevYear && actualColIdx === -1 && (v === "前年実績" || v === "昨年実績" || v === "前年同月実績")) actualColIdx = col;
+                    if (actualColIdx === -1 && v.includes("実績") && !v.includes("累計") && (!v.includes("前") || isPrevYear)) actualColIdx = col;
                 }
-
                 if (actualColIdx !== -1) { singleHeaderRow = r; break; }
             }
 
-            if (sheetMonthIdx === -1 || actualColIdx === -1) {
-                console.log(`[Parser] Skipping "${sheetName}": 月番号=${sheetMonthIdx + 1 || '?'}, 実績列=${actualColIdx}`);
+            if (actualColIdx === -1) {
+                console.log(`[Parser] Skipping "${sheetName}": 実績列が見つかりません`);
                 continue;
             }
 
-            console.log(`[Parser] ✓ Single-month format: ${sheetMonthIdx + 1}月, 実績col=${actualColIdx}, 予算col=${budgetColIdx}, code col=${codeColIdx}, subject col=${subjectColIdx}`);
+            console.log(`[Parser] ✓ 列ヘッダー形式 "${sheetName}": ${sheetMonthIdx + 1}月, 実績col=${actualColIdx}`);
 
-            // 2c. データ行を読み込む
             for (let r = singleHeaderRow + 1; r < jsonData.length; r++) {
                 const row = jsonData[r];
                 if (!row || row.length < 2) continue;
@@ -263,10 +311,10 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                 if (code !== "" || actualVal !== 0 || subject !== "") {
                     allRecords.push({
                         code, subject, department: deptName,
-                        actual: isBudgetMode ? 0 : actualVal,
-                        budget: isBudgetMode ? actualVal : budgetVal,
-                        prevYearActual: 0,
-                        monthIndex: sheetMonthIdx
+                        actual:         isBudgetMode ? 0 : (isPrevYear ? 0 : actualVal),
+                        budget:         isBudgetMode ? actualVal : budgetVal,
+                        prevYearActual: isPrevYear ? actualVal : 0,
+                        monthIndex:     sheetMonthIdx,
                     });
                 }
             }
