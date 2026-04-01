@@ -219,59 +219,13 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                 continue;
             }
 
-            // ── Strategy 2: A列=コード, B列=科目, H列=当月値（固定フォーマット）────
-            // 「貸借対照表」「損益計算書」「販売費及び一般管理費」など
-            // A/B列にコード・科目が存在する場合はH列（index=7）を最優先で使用する
-            {
-                let abStartRow = -1;
-                for (let r = 0; r < Math.min(jsonData.length, 30); r++) {
-                    const row = jsonData[r];
-                    if (!row) continue;
-                    const a = String(row[0] ?? '').normalize('NFKC').trim();
-                    const b = String(row[1] ?? '').normalize('NFKC').trim();
-                    // ラベル行はスキップ
-                    if (['コード','科目コード','勘定コード','CD','Code','科目','科目名','勘定科目'].includes(a)) continue;
-                    // A列が空でなく、B列が科目名らしい文字列なら開始行とみなす
-                    if (a && b && b.length >= 2 && !/^\d+$/.test(b)) {
-                        abStartRow = r;
-                        break;
-                    }
-                }
-
-                if (abStartRow !== -1) {
-                    const VAL_COL = 7; // H列
-                    let hColHeader = '';
-                    for (let r = 0; r < abStartRow; r++) {
-                        const v = String((jsonData[r] ?? [])[VAL_COL] ?? '').normalize('NFKC').trim();
-                        if (v) { hColHeader = v; break; }
-                    }
-                    console.log(`[Parser] ✓ A/B/H形式 "${sheetName}": ${sheetMonthIdx + 1}月, startRow=${abStartRow + 1}, H列="${hColHeader}"`);
-
-                    for (let r = abStartRow; r < jsonData.length; r++) {
-                        const row = jsonData[r];
-                        if (!row || row.length < 2) continue;
-                        const code    = String(row[0] ?? '').trim();
-                        const subject = String(row[1] ?? '').trim();
-                        if (!subject || subject === '科目名' || subject === '科目') continue;
-                        if (subject.includes('合計') || subject.includes('小計') || subject.includes('損益勘定')) continue;
-
-                        const val = parseNumber(row[VAL_COL]);
-                        allRecords.push({
-                            code, subject, department: deptName,
-                            actual:         isBudgetMode ? 0 : (isPrevYear ? 0 : val),
-                            budget:         isBudgetMode ? val : 0,
-                            prevYearActual: isPrevYear ? val : 0,
-                            monthIndex:     sheetMonthIdx,
-                        });
-                    }
-                    continue;
-                }
-            }
-
-            // ── Strategy 3: 列ヘッダーから実績列を検索（A/B構成がないシート用）────
+            // ── 列ヘッダーから各列を特定 ─────────────────────────────
+            // H列（index 7）は常に前年実績（ユーザー仕様）
+            // 明示的な前年ヘッダーがあればそちらを優先
             let singleHeaderRow = -1;
             let actualColIdx    = -1;
             let budgetColIdx    = -1;
+            let prevYearColIdx  = 7; // H列デフォルト（前年実績）
             let codeColIdx      = 0;
             let subjectColIdx   = 1;
 
@@ -282,10 +236,14 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                     const v = String(row[col] ?? "").normalize('NFKC').trim();
                     if (v === "コード" || v === "科目コード" || v === "勘定コード") codeColIdx    = col;
                     if (v === "科目名"  || v === "科目"     || v === "勘定科目")   subjectColIdx = col;
-                    if (actualColIdx === -1 && (v === "当月実績" || v === "実績" || v === "当月" || v === "当月末" || v === "残高" || v === "金額")) actualColIdx = col;
-                    if (budgetColIdx === -1 && (v === "当月予算" || v === "予算")) budgetColIdx = col;
-                    if (isPrevYear && actualColIdx === -1 && (v === "前年実績" || v === "昨年実績" || v === "前年同月実績")) actualColIdx = col;
-                    if (actualColIdx === -1 && v.includes("実績") && !v.includes("累計") && (!v.includes("前") || isPrevYear)) actualColIdx = col;
+                    if (budgetColIdx    === -1 && (v === "当月予算" || v === "予算")) budgetColIdx = col;
+                    // 前年列を明示ヘッダーで上書き
+                    if (v === "前年実績" || v === "昨年実績" || v === "前年同月実績" || v === "前年" || v === "昨年") prevYearColIdx = col;
+                    // 当月実績列（前年列と重複しないもの）
+                    if (actualColIdx === -1 && col !== prevYearColIdx) {
+                        if (v === "当月実績" || v === "実績" || v === "当月" || v === "当月末" || v === "残高" || v === "金額") actualColIdx = col;
+                        else if (v.includes("実績") && !v.includes("累計") && !v.includes("前") && !v.includes("昨")) actualColIdx = col;
+                    }
                 }
                 if (actualColIdx !== -1) { singleHeaderRow = r; break; }
             }
@@ -295,7 +253,7 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                 continue;
             }
 
-            console.log(`[Parser] ✓ 列ヘッダー形式 "${sheetName}": ${sheetMonthIdx + 1}月, 実績col=${actualColIdx}`);
+            console.log(`[Parser] ✓ 列ヘッダー形式 "${sheetName}": ${sheetMonthIdx + 1}月, 実績col=${actualColIdx}, 前年col=${prevYearColIdx}(H列)`);
 
             for (let r = singleHeaderRow + 1; r < jsonData.length; r++) {
                 const row = jsonData[r];
@@ -305,15 +263,16 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                 if (!subject || subject === "科目名" || subject === "科目") continue;
                 if (subject.includes("合計") || subject.includes("小計") || subject.includes("損益勘定") || subject.includes("計算")) continue;
 
-                const actualVal = parseNumber(row[actualColIdx]);
-                const budgetVal = budgetColIdx !== -1 ? parseNumber(row[budgetColIdx]) : 0;
+                const actualVal   = parseNumber(row[actualColIdx]);
+                const budgetVal   = budgetColIdx !== -1 ? parseNumber(row[budgetColIdx]) : 0;
+                const prevYearVal = parseNumber(row[prevYearColIdx]);
 
-                if (code !== "" || actualVal !== 0 || subject !== "") {
+                if (code !== "" || actualVal !== 0 || prevYearVal !== 0 || subject !== "") {
                     allRecords.push({
                         code, subject, department: deptName,
                         actual:         isBudgetMode ? 0 : (isPrevYear ? 0 : actualVal),
                         budget:         isBudgetMode ? actualVal : budgetVal,
-                        prevYearActual: isPrevYear ? actualVal : 0,
+                        prevYearActual: isPrevYear ? actualVal : prevYearVal,
                         monthIndex:     sheetMonthIdx,
                     });
                 }
