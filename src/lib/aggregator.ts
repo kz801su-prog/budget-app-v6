@@ -114,7 +114,12 @@ export const aggregateData = (
                     row.monthlyData[mIdx] = { actual: 0, budget: 0, prevYearActual: 0 };
                 }
                 // Assign previous year's ACTUAL to current year's PREV_YEAR_ACTUAL
-                row.monthlyData[mIdx].prevYearActual = r.actual || 0;
+                // Only overwrite if r.actual is non-zero — don't erase H-column prevYearActual
+                // with zero-actual records (e.g. P/L data uploaded in budget mode)
+                const prevActual = r.actual || 0;
+                if (prevActual !== 0) {
+                    row.monthlyData[mIdx].prevYearActual = prevActual;
+                }
             });
         });
     }

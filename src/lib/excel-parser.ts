@@ -113,6 +113,7 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
             // 月番号をヘッダー値から厳格に読み取る（数値なら1〜12のみ）
             let headerRowIndex = -1;
             let monthColMapping: { colIdx: number, monthIdx: number }[] = [];
+            let prevYearColMapping: { colIdx: number, monthIdx: number }[] = [];
 
             // 最初の5行を全て出力してヘッダーを特定（デバッグ）
             for (let r = 0; r < Math.min(jsonData.length, 5); r++) {
@@ -129,6 +130,7 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                 if (!row) continue;
 
                 const potentialMapping: { colIdx: number, monthIdx: number }[] = [];
+                const potentialPrevYearMapping: { colIdx: number, monthIdx: number }[] = [];
 
                 // col=0 はコード列、col=1 は科目名列のため月ヘッダーは col=2 から
                 for (let col = 2; col < row.length; col++) {
@@ -141,6 +143,9 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                         const monthIdx = MONTH_NUM_TO_IDX[monthNum];
                         if (!potentialMapping.some(m => m.monthIdx === monthIdx)) {
                             potentialMapping.push({ colIdx: col, monthIdx: monthIdx });
+                        } else if (!potentialPrevYearMapping.some(m => m.monthIdx === monthIdx)) {
+                            // 2回目に現れた同月 → 前年実績列として扱う
+                            potentialPrevYearMapping.push({ colIdx: col, monthIdx: monthIdx });
                         }
                     }
                 }
@@ -150,7 +155,13 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                     monthColMapping = potentialMapping.sort((a, b) =>
                         fiscalMonths.indexOf(a.monthIdx) - fiscalMonths.indexOf(b.monthIdx)
                     );
+                    prevYearColMapping = potentialPrevYearMapping.sort((a, b) =>
+                        fiscalMonths.indexOf(a.monthIdx) - fiscalMonths.indexOf(b.monthIdx)
+                    );
                     console.log(`[Parser] ✓ Header at row${r + 1}. Month cols: ${monthColMapping.map(m => `col${m.colIdx}→${m.monthIdx + 1}月`).join(', ')}`);
+                    if (prevYearColMapping.length > 0) {
+                        console.log(`[Parser] ✓ PrevYear cols: ${prevYearColMapping.map(m => `col${m.colIdx}→${m.monthIdx + 1}月`).join(', ')}`);
+                    }
                     break;
                 }
             }
@@ -183,12 +194,14 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
 
                     monthColMapping.forEach(mapping => {
                         const val = parseNumber(row[mapping.colIdx]);
-                        if (code !== "" || val !== 0 || (subject !== "" && !subject.startsWith(" "))) {
+                        const prevYearMapping = prevYearColMapping.find(m => m.monthIdx === mapping.monthIdx);
+                        const prevYearVal = prevYearMapping ? parseNumber(row[prevYearMapping.colIdx]) : 0;
+                        if (code !== "" || val !== 0 || prevYearVal !== 0 || (subject !== "" && !subject.startsWith(" "))) {
                             allRecords.push({
                                 code, subject, department: deptName,
                                 actual:        isBudgetMode ? 0 : (isPrevYear ? 0 : val),
                                 budget:        isBudgetMode ? val : 0,
-                                prevYearActual: isPrevYear ? val : 0,
+                                prevYearActual: isPrevYear ? val : prevYearVal,
                                 monthIndex: mapping.monthIdx
                             });
                         }
@@ -246,6 +259,8 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                     }
                 }
                 if (actualColIdx !== -1) { singleHeaderRow = r; break; }
+                // 予算列のみある場合（予算モードの単月P/L等）：予算列を実績列として扱う
+                if (actualColIdx === -1 && budgetColIdx !== -1) { actualColIdx = budgetColIdx; singleHeaderRow = r; break; }
             }
 
             if (actualColIdx === -1) {
