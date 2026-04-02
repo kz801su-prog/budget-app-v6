@@ -171,18 +171,25 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
             if (headerRowIndex !== -1) {
                 // コード列・科目列をヘッダー値から検索（固定オフセットでなく実際のラベルを優先）
                 const headerRow = jsonData[headerRowIndex] || [];
-                let codeColIdx    = -1;
-                let subjectColIdx = -1;
+                let codeColIdx        = -1;
+                let subjectColIdx     = -1;
+                let annualPrevYearCol = -1; // 「前年実績」年間合計列（ヒットサンク等）
+                const monthColSet = new Set(monthColMapping.map(m => m.colIdx));
+
                 for (let col = 0; col < headerRow.length; col++) {
                     const v = String(headerRow[col] ?? '').normalize('NFKC').trim();
                     if (codeColIdx    === -1 && (v === 'コード' || v === '科目コード' || v === '勘定コード' || v === 'CD' || v === 'Code')) codeColIdx    = col;
                     if (subjectColIdx === -1 && (v === '科目名' || v === '科目' || v === '勘定科目' || v === '項目'))                        subjectColIdx = col;
+                    // 月列でも重複月列でもない「前年実績」単独列を検出
+                    if (annualPrevYearCol === -1 && !monthColSet.has(col)) {
+                        if (v === '前年実績' || v === '昨年実績' || v === '前年度実績' || v === '前年') annualPrevYearCol = col;
+                    }
                 }
                 // ラベルで見つからない場合は月列の直前2列をフォールバック
                 const firstMonthCol = Math.min(...monthColMapping.map(m => m.colIdx));
                 if (codeColIdx    === -1) codeColIdx    = Math.max(0, firstMonthCol - 2);
                 if (subjectColIdx === -1) subjectColIdx = Math.max(0, firstMonthCol - 1);
-                console.log(`[Parser] ✓ Annual format. Code col=${codeColIdx}, Subject col=${subjectColIdx}`);
+                console.log(`[Parser] ✓ Annual format. Code col=${codeColIdx}, Subject col=${subjectColIdx}, annualPrevYear col=${annualPrevYearCol}`);
 
                 for (let r = headerRowIndex + 1; r < jsonData.length; r++) {
                     const row = jsonData[r];
@@ -192,10 +199,16 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                     if (!subject || subject === "科目" || subject === "科目名") continue;
                     if (subject.includes("合計") || subject.includes("小計") || subject.includes("損益勘定") || subject.includes("計算")) continue;
 
+                    // 前年実績年間合計（例: ヒットサンク col17）がある場合は月2（3月=年度末）に格納
+                    const annualPrevYearVal = annualPrevYearCol !== -1 ? parseNumber(row[annualPrevYearCol]) : 0;
+
                     monthColMapping.forEach(mapping => {
                         const val = parseNumber(row[mapping.colIdx]);
                         const prevYearMapping = prevYearColMapping.find(m => m.monthIdx === mapping.monthIdx);
-                        const prevYearVal = prevYearMapping ? parseNumber(row[prevYearMapping.colIdx]) : 0;
+                        // per-month前年列 > 年間前年列(3月のみ付与) > 0
+                        const prevYearVal = prevYearMapping
+                            ? parseNumber(row[prevYearMapping.colIdx])
+                            : (mapping.monthIdx === 2 ? annualPrevYearVal : 0);
                         if (code !== "" || val !== 0 || prevYearVal !== 0 || (subject !== "" && !subject.startsWith(" "))) {
                             allRecords.push({
                                 code, subject, department: deptName,
@@ -270,6 +283,8 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
 
             console.log(`[Parser] ✓ 列ヘッダー形式 "${sheetName}": ${sheetMonthIdx + 1}月, 実績col=${actualColIdx}, 前年col=${prevYearColIdx}(H列)`);
 
+            // 最初のデータ行をデバッグ出力
+            let debugPrinted = false;
             for (let r = singleHeaderRow + 1; r < jsonData.length; r++) {
                 const row = jsonData[r];
                 if (!row || row.length < 2) continue;
@@ -277,6 +292,11 @@ export const parseExcelFile = async (file: File, isBudgetMode: boolean = false, 
                 const subject = String(row[subjectColIdx] ?? "").trim();
                 if (!subject || subject === "科目名" || subject === "科目") continue;
                 if (subject.includes("合計") || subject.includes("小計") || subject.includes("損益勘定") || subject.includes("計算")) continue;
+
+                if (!debugPrinted) {
+                    console.log(`[Parser] "${sheetName}" 最初のデータ行: code="${code}" subject="${subject}" col${actualColIdx}=${JSON.stringify(row[actualColIdx])} col${prevYearColIdx}(前年)=${JSON.stringify(row[prevYearColIdx])}`);
+                    debugPrinted = true;
+                }
 
                 const actualVal   = parseNumber(row[actualColIdx]);
                 const budgetVal   = budgetColIdx !== -1 ? parseNumber(row[budgetColIdx]) : 0;

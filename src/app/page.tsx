@@ -269,6 +269,14 @@ export default function Home() {
       }
 
       // 3. 前年実績を保存
+      const deptSummary = prevYearRecs.reduce((acc, r) => {
+        acc[r.department] = (acc[r.department] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+      console.log(`[Upload] prevYearRecs: ${prevYearRecs.length}件`, deptSummary);
+      if (prevYearRecs.length > 0) {
+        console.log('[Upload] prevYearRecs sample:', prevYearRecs.slice(0, 3).map(r => ({ dept: r.department, code: r.code, subject: r.subject, prevYearActual: r.prevYearActual, monthIndex: r.monthIndex })));
+      }
       if (activePrevYearMonths.size > 0) {
         await saveInChunks(toApiRecords(prevYearRecs, r => r.prevYearActual ?? 0), 'prev_year_actual');
       }

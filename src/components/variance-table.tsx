@@ -1,12 +1,11 @@
 "use client"
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { PnLData } from '@/lib/types';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 
-// 月次累計は常にセル合計から計算（calc-first モード）
 const FIRST_HALF  = [3, 4, 5, 6, 7, 8];
 const SECOND_HALF = [9, 10, 11, 0, 1, 2];
 const Q1 = [3, 4, 5];
@@ -28,8 +27,12 @@ interface VarianceTableProps {
 
 const MONTH_ORDER = [3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2];
 const MONTH_NAMES = ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar"];
+const SEP_MONTH_IDX = 8; // monthIndex for September
+
+type AdjMap = Record<string, number>; // key: `${dept}||${code}||${subject}`
 
 interface EditingCell { dept: string; code: string; subject: string; month: number; }
+interface EditingAdj  { dept: string; code: string; subject: string; }
 
 export function VarianceTable({
     data, selectedDepartment, isThousands = true, sheetFilter, onCellEdit,
@@ -37,6 +40,37 @@ export function VarianceTable({
     const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
     const [editValue, setEditValue]     = useState<string>('');
     const [saving, setSaving]           = useState(false);
+
+    // 修正列
+    const storageKey = `pl_variance_adj_${selectedDepartment ?? 'all'}_${sheetFilter?.join('_') ?? ''}`;
+    const [adjMap, setAdjMap] = useState<AdjMap>({});
+    const [editingAdj, setEditingAdj] = useState<EditingAdj | null>(null);
+    const [adjEditValue, setAdjEditValue] = useState('');
+
+    useEffect(() => {
+        try {
+            const raw = localStorage.getItem(storageKey);
+            if (raw) setAdjMap(JSON.parse(raw));
+        } catch { /* ignore */ }
+    }, [storageKey]);
+
+    const rowKey = (dept: string, code: string, subject: string) => `${dept}||${code}||${subject}`;
+
+    const startAdjEdit = (dept: string, code: string, subject: string, currentRaw: number) => {
+        setEditingAdj({ dept, code, subject });
+        const display = isThousands ? Math.floor(currentRaw / 1000) : currentRaw;
+        setAdjEditValue(display === 0 ? '' : String(display));
+    };
+
+    const commitAdjEdit = (dept: string, code: string, subject: string) => {
+        const typed = parseFloat(adjEditValue.replace(/,/g, '')) || 0;
+        const raw   = isThousands ? typed * 1000 : typed;
+        const key   = rowKey(dept, code, subject);
+        const next  = { ...adjMap, [key]: raw };
+        setAdjMap(next);
+        localStorage.setItem(storageKey, JSON.stringify(next));
+        setEditingAdj(null);
+    };
 
     let filteredRows = selectedDepartment
         ? data.rows.filter(r => r.department === selectedDepartment)
@@ -90,6 +124,9 @@ export function VarianceTable({
                                     ✏️ セルクリックで編集
                                 </span>
                             )}
+                            <span className="text-[10px] text-amber-600 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                                ✏️ Sep右の修正欄で中間修正
+                            </span>
                             <span className="text-[10px] text-slate-400 font-medium bg-slate-50 px-2 py-0.5 rounded border">
                                 単位: {isThousands ? "千円" : "円"}
                             </span>
@@ -98,15 +135,24 @@ export function VarianceTable({
                 </CardHeader>
                 <CardContent className="p-0">
                     <div className="h-[700px] w-full overflow-auto">
-                        <div className="min-w-[1800px]">
+                        <div className="min-w-[2000px]">
                             <Table>
                                 <TableHeader>
                                     <TableRow className="bg-slate-50 hover:bg-slate-50">
                                         <TableHead className="w-[80px] sticky left-0 bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Code</TableHead>
                                         <TableHead className="w-[200px] sticky left-[80px] bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Subject</TableHead>
-                                        {MONTH_NAMES.map(m => (
-                                            <TableHead key={m} className="text-right min-w-[90px] text-slate-600 font-semibold">{m}</TableHead>
+                                        {MONTH_NAMES.map((name, i) => (
+                                            <TableHead key={name} className="text-right min-w-[90px] text-slate-600 font-semibold">
+                                                {name}
+                                                {MONTH_ORDER[i] === SEP_MONTH_IDX && (
+                                                    <span className="block text-[9px] text-amber-500">↓修正</span>
+                                                )}
+                                            </TableHead>
                                         ))}
+                                        {/* Sep直後の修正列ヘッダー */}
+                                        <TableHead className="text-right min-w-[90px] bg-amber-50 text-amber-800 font-bold border-x border-amber-200">
+                                            修正<br /><span className="text-[10px] font-normal">Adj</span>
+                                        </TableHead>
                                         <TableHead className="text-right font-bold w-[100px] bg-green-50 text-green-900 border-l border-green-100">1Q<br /><span className="text-[10px] font-normal">Apr-Jun</span></TableHead>
                                         <TableHead className="text-right font-bold w-[100px] bg-green-50 text-green-900 border-green-100">2Q<br /><span className="text-[10px] font-normal">Jul-Sep</span></TableHead>
                                         <TableHead className="text-right font-bold w-[110px] bg-blue-50 text-blue-900 border-l border-blue-100">1H<br /><span className="text-[10px] font-normal">上期合計</span></TableHead>
@@ -119,14 +165,20 @@ export function VarianceTable({
                                 </TableHeader>
                                 <TableBody>
                                     {filteredRows.map((row, idx) => {
-                                        // ── calc-first: 常にセル合計から計算 ──────────
+                                        const key    = rowKey(row.department, row.code, row.subject);
+                                        const adjRaw = adjMap[key] || 0;
+                                        const adjDisplay = isThousands ? Math.floor(adjRaw / 1000) : adjRaw;
+                                        const isEditingAdjCell = editingAdj?.dept === row.department &&
+                                            editingAdj?.code === row.code &&
+                                            editingAdj?.subject === row.subject;
+
                                         const q1Val  = sumMonths(row, Q1);
                                         const q2Val  = sumMonths(row, Q2);
                                         const q3Val  = sumMonths(row, Q3);
                                         const q4Val  = sumMonths(row, Q4);
                                         const h1Val  = q1Val + q2Val;
                                         const h2Val  = q3Val + q4Val;
-                                        const fyVal  = h1Val + h2Val;
+                                        const fyVal  = h1Val + h2Val + adjRaw; // 修正値を年間合計に加算
                                         const budFY  = FIRST_HALF.concat(SECOND_HALF).reduce((s, m) => s + (row.monthlyData[m]?.budget || 0), 0);
                                         const varPct = budFY !== 0
                                             ? ((fyVal - budFY) / budFY) * 100
@@ -186,7 +238,31 @@ export function VarianceTable({
                                                     );
                                                 })}
 
-                                                {/* Quarterly Totals (calc-first) */}
+                                                {/* 修正列セル */}
+                                                <TableCell
+                                                    className="text-right text-xs bg-amber-50/60 border-x border-amber-200 cursor-pointer hover:bg-amber-100 p-0"
+                                                    onClick={() => !isEditingAdjCell && startAdjEdit(row.department, row.code, row.subject, adjRaw)}
+                                                >
+                                                    {isEditingAdjCell ? (
+                                                        <input
+                                                            autoFocus
+                                                            className="w-full text-right text-xs px-1 py-0.5 border border-amber-400 rounded outline-none bg-white"
+                                                            value={adjEditValue}
+                                                            onChange={e => setAdjEditValue(e.target.value)}
+                                                            onBlur={() => commitAdjEdit(row.department, row.code, row.subject)}
+                                                            onKeyDown={e => {
+                                                                if (e.key === 'Enter') commitAdjEdit(row.department, row.code, row.subject);
+                                                                if (e.key === 'Escape') setEditingAdj(null);
+                                                            }}
+                                                        />
+                                                    ) : (
+                                                        <span className="px-2 py-1 block text-amber-700 font-semibold">
+                                                            {adjRaw !== 0 ? adjDisplay.toLocaleString() : "-"}
+                                                        </span>
+                                                    )}
+                                                </TableCell>
+
+                                                {/* Quarterly / Half / Annual Totals */}
                                                 <TableCell className="text-right font-bold text-sm bg-green-50/50 border-l border-green-100 text-green-900 px-2">
                                                     {fmt(q1Val)}
                                                 </TableCell>
