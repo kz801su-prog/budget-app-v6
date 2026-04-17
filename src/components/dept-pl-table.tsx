@@ -50,15 +50,16 @@ export function DeptPLTable({
     };
     const currentLabel = dataTypeLabels[dataType];
 
-    const CORE_SHEETS = ['貸借対照表', '損益計算書', '販売費及び一般管理費'];
+    const CORE_KEYWORDS = ['貸借対照表', '損益計算書', '販売費及び一般管理費', '販売費', '合併', '連結'];
+    const isCoreSheet = (dept: string) => CORE_KEYWORDS.some(k => dept.includes(k));
 
-    let deptRows = data.rows.filter(r => !CORE_SHEETS.includes(r.department));
+    let deptRows = data.rows.filter(r => !isCoreSheet(r.department));
     if (selectedDepartment && selectedDepartment !== "All") {
         deptRows = deptRows.filter(r => r.department === selectedDepartment);
     }
 
     // Navigation
-    const availableDepts = allDepartments.filter(d => d !== "All" && !CORE_SHEETS.includes(d));
+    const availableDepts = allDepartments.filter(d => d !== "All" && !isCoreSheet(d));
     const currentIndex   = selectedDepartment ? availableDepts.indexOf(selectedDepartment) : -1;
     const hasPrev = currentIndex > 0;
     const hasNext = availableDepts.length > 0 && currentIndex < availableDepts.length - 1;
@@ -149,14 +150,13 @@ export function DeptPLTable({
                 </CardHeader>
 
                 <CardContent className="p-0">
-                    <div className="h-[700px] w-full overflow-auto">
-                        <div className="min-w-[1600px]">
-                            <Table>
+                    <div className="h-[700px] w-full overflow-y-auto">
+                            <Table className="min-w-[1700px]">
                                 <TableHeader>
                                     <TableRow className="bg-slate-50 hover:bg-slate-50">
-                                        <TableHead className="w-[150px] sticky left-0 bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Department</TableHead>
-                                        <TableHead className="w-[80px] sticky left-[150px] bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Code</TableHead>
-                                        <TableHead className="w-[200px] sticky left-[230px] bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Subject</TableHead>
+                                        <TableHead className="w-[90px] sticky left-0 bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Dept</TableHead>
+                                        <TableHead className="w-[72px] sticky left-[90px] bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Code</TableHead>
+                                        <TableHead className="w-[180px] sticky left-[162px] bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Subject</TableHead>
                                         {MONTH_NAMES.map(m => (
                                             <TableHead key={m} className="text-right min-w-[90px] text-slate-600 font-semibold">{m}</TableHead>
                                         ))}
@@ -166,6 +166,15 @@ export function DeptPLTable({
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
+                                    {deptRows.length === 0 && (
+                                        <TableRow>
+                                            <TableCell colSpan={17} className="h-32 text-center text-slate-400 text-sm">
+                                                {dataType === 'prevYear'
+                                                    ? '前年データがありません。前年分のExcelをアップロードしてください。'
+                                                    : '部門別データがありません。各部門のシートが含まれたExcelをアップロードしてください。'}
+                                            </TableCell>
+                                        </TableRow>
+                                    )}
                                     {deptRows.map((row, idx) => {
                                         // calc-first
                                         const h1Val = sumMonths(row, FIRST_HALF);
@@ -175,19 +184,19 @@ export function DeptPLTable({
                                         return (
                                             <TableRow
                                                 key={`${row.department}-${row.code}-${row.subject}`}
-                                                className={idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"}
+                                                className={idx % 2 === 0 ? "bg-white" : "bg-slate-50"}
                                             >
                                                 <TableCell className={cn(
-                                                    "text-xs font-medium text-indigo-600 sticky left-0 z-10 border-r shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
-                                                    idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
-                                                )}>{row.department}</TableCell>
+                                                    "text-[11px] font-medium text-indigo-600 sticky left-0 z-10 border-r shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] truncate max-w-[90px]",
+                                                    idx % 2 === 0 ? "bg-white" : "bg-slate-50"
+                                                )} title={row.department}>{row.department.length > 10 ? row.department.slice(0, 9) + '…' : row.department}</TableCell>
                                                 <TableCell className={cn(
-                                                    "font-mono text-xs text-slate-500 sticky left-[150px] z-10 border-r shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
-                                                    idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
+                                                    "font-mono text-xs text-slate-500 sticky left-[90px] z-10 border-r shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
+                                                    idx % 2 === 0 ? "bg-white" : "bg-slate-50"
                                                 )}>{row.code}</TableCell>
                                                 <TableCell className={cn(
-                                                    "sticky left-[230px] border-r font-medium text-sm z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
-                                                    idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
+                                                    "sticky left-[162px] border-r font-medium text-sm z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
+                                                    idx % 2 === 0 ? "bg-white" : "bg-slate-50"
                                                 )}>{row.subject}</TableCell>
 
                                                 {MONTH_ORDER.map(m => {
@@ -242,7 +251,6 @@ export function DeptPLTable({
                                     })}
                                 </TableBody>
                             </Table>
-                        </div>
                     </div>
                 </CardContent>
             </Card>

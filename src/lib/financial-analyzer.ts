@@ -313,9 +313,11 @@ export const DEFINITIONS: MetricDefinition[] = [
         calculator: (d, p, tr, glm, cs) => {
             const sales = findValue(d, p, '9601', ['売上高'], false, tr, glm, false, [], false, cs);
             const vCosts = findValue(d, p, 'COGS', ['売上原価'], false, tr, glm, false, [], false, cs);
-            const fCosts = findValue(d, p, 'SGA', ['販売管理費'], false, tr, glm, false, [], false, cs);
-            const mp = sales - vCosts;
-            const mpRatio = sales ? mp / sales : 0;
+            const opProfit = findValue(d, p, '9622', ['営業利益'], false, tr, glm, false, [], false, cs);
+            const grossProfit = sales - vCosts;
+            // SGA = Gross Profit - Operating Profit (derived, avoids keyword mismatch)
+            const fCosts = grossProfit - opProfit;
+            const mpRatio = sales ? grossProfit / sales : 0;
             const bep = mpRatio ? fCosts / mpRatio : 0;
             return sales ? (bep / sales) * 100 : 0;
         }
@@ -474,7 +476,7 @@ export const DEFINITIONS: MetricDefinition[] = [
         labelJp: '利払い・税引前・償却前利益',
         meaning: '営業利益 + 減価償却費（キャッシュ創出力の指標）',
         calculator: (d, p, tr, glm) => {
-            const opProfit = findValue(d, p, 'OperatingProfit', ['営業利益'], false, tr, glm);
+            const opProfit = findValue(d, p, '9622', ['営業利益'], false, tr, glm);
             const depreciation = findValue(d, p, '9515', ['減価償却費'], false, tr, glm);
             return opProfit + Math.abs(depreciation);
         }
@@ -485,8 +487,8 @@ export const DEFINITIONS: MetricDefinition[] = [
         labelJp: '売上高成長率（前年比）',
         meaning: '(当期売上 - 前期売上) / 前期売上 × 100',
         calculator: (d, p, tr, glm) => {
-            const currentSales = findValue(d, p, 'Sales', ['売上高'], false, tr, glm, false);
-            const prevSales = findValue(d, p, 'Sales', ['売上高'], false, tr, glm, true);
+            const currentSales = findValue(d, p, '9601', ['売上高'], false, tr, glm, false);
+            const prevSales = findValue(d, p, '9601', ['売上高'], false, tr, glm, true);
             return prevSales ? ((currentSales - prevSales) / prevSales) * 100 : 0;
         }
     },
@@ -496,8 +498,8 @@ export const DEFINITIONS: MetricDefinition[] = [
         labelJp: '営業利益成長率（前年比）',
         meaning: '(当期営業利益 - 前期営業利益) / 前期営業利益 × 100',
         calculator: (d, p, tr, glm) => {
-            const currentOp = findValue(d, p, 'OperatingProfit', ['営業利益'], false, tr, glm, false);
-            const prevOp = findValue(d, p, 'OperatingProfit', ['営業利益'], false, tr, glm, true);
+            const currentOp = findValue(d, p, '9622', ['営業利益'], false, tr, glm, false);
+            const prevOp = findValue(d, p, '9622', ['営業利益'], false, tr, glm, true);
             return prevOp ? ((currentOp - prevOp) / prevOp) * 100 : 0;
         }
     },
@@ -508,7 +510,7 @@ export const DEFINITIONS: MetricDefinition[] = [
         meaning: 'ROE分解1: 当期純利益 / 売上高 × 100',
         calculator: (d, p, tr, glm) => {
             const netIncome = findValue(d, p, '9690', ['当期純利益'], false, tr, glm);
-            const sales = findValue(d, p, 'Sales', ['売上高'], false, tr, glm);
+            const sales = findValue(d, p, '9601', ['売上高'], false, tr, glm);
             return sales ? (netIncome / sales) * 100 : 0;
         }
     },
@@ -520,16 +522,21 @@ export const DEFINITIONS: MetricDefinition[] = [
         labelJp: 'キャッシュコンバージョンサイクル',
         meaning: '売上債権回転期間 + 棚卸資産回転期間 - 買入債務回転期間',
         calculator: (d, p, tr, glm) => {
-            const sales = findValue(d, p, 'Sales', ['売上高'], false, tr, glm);
-            const ar = findValue(d, p, '11201', ['売上債権', '受取手形'], true, tr, glm);
-            const inventory = findValue(d, p, '11401', ['棚卸資産', '商品'], true, tr, glm);
-            const ap = findValue(d, p, '21201', ['買入債務', '支払手形'], true, tr, glm);
+            const sales = findValue(d, p, '9601', ['売上高'], false, tr, glm);
+            // AR: 受取手形 + 売掛金
+            const ar = findValue(d, p, '11121', ['受取手形'], true, tr, glm)
+                     + findValue(d, p, '11124', ['売掛金'], true, tr, glm);
+            // Inventory: 商品・棚卸資産
+            const inventory = findValue(d, p, '11201', ['商品', '棚卸資産', '製品'], true, tr, glm);
+            // AP: 支払手形 + 買掛金
+            const ap = findValue(d, p, '21101', ['支払手形'], true, tr, glm)
+                     + findValue(d, p, '21104', ['買掛金', '買入債務'], true, tr, glm);
 
             if (!sales) return 0;
 
-            const dso = (ar / sales) * 365; // 売上債権回転期間
-            const dio = (inventory / sales) * 365; // 棚卸資産回転期間
-            const dpo = (ap / sales) * 365; // 買入債務回転期間
+            const dso = (ar / sales) * 365;
+            const dio = (inventory / sales) * 365;
+            const dpo = (ap / sales) * 365;
 
             return dso + dio - dpo;
         }
@@ -568,7 +575,7 @@ export const DEFINITIONS: MetricDefinition[] = [
         labelJp: 'EV/EBITDA倍率',
         meaning: '企業価値 / EBITDA（M&A評価指標）',
         calculator: (d, p, tr, glm) => {
-            const opProfit = findValue(d, p, 'OperatingProfit', ['営業利益'], false, tr, glm);
+            const opProfit = findValue(d, p, '9622', ['営業利益'], false, tr, glm);
             const depreciation = findValue(d, p, '9515', ['減価償却費'], false, tr, glm);
             const ebitda = opProfit + Math.abs(depreciation);
 

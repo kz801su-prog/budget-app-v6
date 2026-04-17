@@ -95,6 +95,37 @@ const findDeptValuePrevYear = (
     }, 0);
 };
 
+// Budget value helper
+const findDeptValueBudget = (
+    rows: AggregatedRow[],
+    period: Period,
+    targetCode: string,
+    keywords: string[] = []
+): number => {
+    const getPeriodMonths = (p: Period): number[] => {
+        if (typeof p === 'number') return [p];
+        return p === '1H' ? FIRST_HALF : p === '2H' ? SECOND_HALF : FISCAL_MONTHS;
+    };
+
+    const targetMonths = getPeriodMonths(period);
+
+    let matchingRows = rows.filter(r => {
+        const c = r.code ? r.code.replace(/[^0-9]/g, '') : '';
+        return c === targetCode;
+    });
+
+    if (matchingRows.length === 0 && keywords.length > 0) {
+        matchingRows = rows.filter(r =>
+            keywords.some(k => r.subject.toLowerCase().includes(k.toLowerCase()))
+        );
+    }
+
+    return matchingRows.reduce((sum, r) => {
+        const total = targetMonths.reduce((mSum, m) => mSum + (r.monthlyData[m]?.budget || 0), 0);
+        return sum + total;
+    }, 0);
+};
+
 // Define department-specific metrics
 export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
     // 1. Profitability (収益性)
@@ -139,7 +170,47 @@ export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
         }
     },
 
+    {
+        id: 'sales_budget_achievement',
+        labelEng: 'Sales Budget Achievement',
+        labelJp: '売上予算達成率',
+        meaning: '予算対比実績売上の達成率。100%以上で予算超過',
+        unit: '%',
+        category: 'profitability',
+        calculator: (d, p) => {
+            const actual = findDeptValue(d.rows, p, '9821', ['売上高']);
+            const budget = findDeptValueBudget(d.rows, p, '9821', ['売上高']);
+            return budget ? (actual / budget) * 100 : 0;
+        }
+    },
+    {
+        id: 'op_budget_achievement',
+        labelEng: 'Op. Profit Budget Achievement',
+        labelJp: '営業利益予算達成率',
+        meaning: '予算対比実績営業利益の達成率',
+        unit: '%',
+        category: 'profitability',
+        calculator: (d, p) => {
+            const actual = findDeptValue(d.rows, p, '9861', ['営業利益']);
+            const budget = findDeptValueBudget(d.rows, p, '9861', ['営業利益']);
+            return budget ? (actual / budget) * 100 : 0;
+        }
+    },
+
     // 2. Cost Efficiency (費用効率)
+    {
+        id: 'cogs_ratio',
+        labelEng: 'COGS Ratio',
+        labelJp: '売上原価率',
+        meaning: '売上に対する売上原価の割合。低いほど付加価値が高い',
+        unit: '%',
+        category: 'cost_efficiency',
+        calculator: (d, p) => {
+            const sales = findDeptValue(d.rows, p, '9821', ['売上高']);
+            const cogs = findDeptValue(d.rows, p, 'COGS', ['売上原価']);
+            return sales ? (cogs / sales) * 100 : 0;
+        }
+    },
     {
         id: 'sga_ratio',
         labelEng: 'SG&A Ratio',
@@ -149,7 +220,10 @@ export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
         category: 'cost_efficiency',
         calculator: (d, p) => {
             const sales = findDeptValue(d.rows, p, '9821', ['売上高']);
-            const sga = findDeptValue(d.rows, p, 'SGA', ['販売費', '一般管理費']);
+            const cogs = findDeptValue(d.rows, p, 'COGS', ['売上原価']);
+            const opProfit = findDeptValue(d.rows, p, '9861', ['営業利益']);
+            const grossProfit = sales - cogs;
+            const sga = grossProfit - opProfit;
             return sales ? (sga / sales) * 100 : 0;
         }
     },
@@ -205,6 +279,41 @@ export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
             const currentOp = findDeptValue(d.rows, p, '9861', ['営業利益']);
             const prevOp = findDeptValuePrevYear(d.rows, p, '9861', ['営業利益']);
             return prevOp ? ((currentOp - prevOp) / prevOp) * 100 : 0;
+        }
+    },
+
+    {
+        id: 'op_margin_yoy_diff',
+        labelEng: 'Op. Margin YoY Chg (pp)',
+        labelJp: '営業利益率前年差（pp）',
+        meaning: '営業利益率の前年同期比増減ポイント。プラスで収益性改善',
+        unit: 'pp',
+        category: 'growth',
+        calculator: (d, p) => {
+            const sales    = findDeptValue(d.rows, p, '9821', ['売上高']);
+            const opProfit = findDeptValue(d.rows, p, '9861', ['営業利益']);
+            const prevSales = findDeptValuePrevYear(d.rows, p, '9821', ['売上高']);
+            const prevOp    = findDeptValuePrevYear(d.rows, p, '9861', ['営業利益']);
+            const cur  = sales     ? (opProfit / sales)     * 100 : 0;
+            const prev = prevSales ? (prevOp   / prevSales) * 100 : 0;
+            return cur - prev;
+        }
+    },
+    {
+        id: 'gross_margin_yoy_diff',
+        labelEng: 'Gross Margin YoY Chg (pp)',
+        labelJp: '粗利率前年差（pp）',
+        meaning: '粗利率の前年同期比増減ポイント',
+        unit: 'pp',
+        category: 'growth',
+        calculator: (d, p) => {
+            const sales     = findDeptValue(d.rows, p, '9821', ['売上高']);
+            const cogs      = findDeptValue(d.rows, p, 'COGS', ['売上原価']);
+            const prevSales = findDeptValuePrevYear(d.rows, p, '9821', ['売上高']);
+            const prevCogs  = findDeptValuePrevYear(d.rows, p, 'COGS', ['売上原価']);
+            const cur  = sales     ? ((sales     - cogs)     / sales)     * 100 : 0;
+            const prev = prevSales ? ((prevSales - prevCogs) / prevSales) * 100 : 0;
+            return cur - prev;
         }
     },
 
@@ -280,14 +389,15 @@ export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
     {
         id: 'fixed_cost_ratio',
         labelEng: 'Fixed Cost Ratio',
-        labelJp: '固定費率',
-        meaning: '売上に対する固定費の割合。不況への耐性を示す',
+        labelJp: '固定費率（販管費率）',
+        meaning: '売上に対する固定費（販管費）の割合。不況への耐性を示す',
         unit: '%',
         category: 'quality',
         calculator: (d, p) => {
             const sales = findDeptValue(d.rows, p, '9821', ['売上高']);
-            const sga = findDeptValue(d.rows, p, 'SGA', ['販売費', '一般管理費']);
-            // Assume SGA is mostly fixed cost
+            const cogs = findDeptValue(d.rows, p, 'COGS', ['売上原価']);
+            const opProfit = findDeptValue(d.rows, p, '9861', ['営業利益']);
+            const sga = (sales - cogs) - opProfit;
             return sales ? (sga / sales) * 100 : 0;
         }
     },
@@ -301,11 +411,29 @@ export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
         calculator: (d, p) => {
             const sales = findDeptValue(d.rows, p, '9821', ['売上高']);
             const cogs = findDeptValue(d.rows, p, 'COGS', ['売上原価']);
-            const sga = findDeptValue(d.rows, p, 'SGA', ['販売費', '一般管理費']);
+            const opProfit = findDeptValue(d.rows, p, '9861', ['営業利益']);
             const grossProfit = sales - cogs;
+            const sga = grossProfit - opProfit;
             const grossMarginRate = sales ? grossProfit / sales : 0;
             const breakEvenSales = grossMarginRate ? sga / grossMarginRate : 0;
             return sales ? (breakEvenSales / sales) * 100 : 0;
+        }
+    },
+
+    {
+        id: 'cost_coverage',
+        labelEng: 'Gross Profit Coverage Ratio',
+        labelJp: '固定費カバレッジ（粗利÷販管費）',
+        meaning: '粗利益が販管費の何倍かを示す。1倍以下は赤字リスク大',
+        unit: '倍',
+        category: 'quality',
+        calculator: (d, p) => {
+            const sales     = findDeptValue(d.rows, p, '9821', ['売上高']);
+            const cogs      = findDeptValue(d.rows, p, 'COGS', ['売上原価']);
+            const opProfit  = findDeptValue(d.rows, p, '9861', ['営業利益']);
+            const grossProfit = sales - cogs;
+            const sga = grossProfit - opProfit;
+            return sga > 0 ? grossProfit / sga : 0;
         }
     },
 
@@ -314,7 +442,7 @@ export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
         id: 'operating_leverage',
         labelEng: 'Operating Leverage',
         labelJp: '営業レバレッジ',
-        meaning: '売上総利益÷営業利益。売上変動が利益に与える影響の大きさ',
+        meaning: '売上総利益÷営業利益。売上変動が利益に与える影響の大きさ（高いほどリスク大）',
         unit: '倍',
         category: 'advanced',
         calculator: (d, p) => {
@@ -322,7 +450,8 @@ export const DEPT_METRIC_DEFINITIONS: DeptMetricDefinition[] = [
             const cogs = findDeptValue(d.rows, p, 'COGS', ['売上原価']);
             const grossProfit = sales - cogs;
             const opProfit = findDeptValue(d.rows, p, '9861', ['営業利益']);
-            return opProfit ? grossProfit / opProfit : 0;
+            if (!opProfit || opProfit <= 0) return 0;
+            return grossProfit / opProfit;
         }
     },
     {

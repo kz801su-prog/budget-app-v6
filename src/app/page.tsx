@@ -12,7 +12,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Download, RefreshCw, LayoutDashboard, PlusCircle, Trash2, Building2, CalendarDays } from 'lucide-react';
+import { Download, RefreshCw, LayoutDashboard, PlusCircle, Trash2, Building2, CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Dashboard } from '@/components/dashboard';
 import { AIAdvisor } from '@/components/ai-advisor';
 import { History, Brain, BarChart3, Building } from 'lucide-react';
@@ -40,6 +40,7 @@ export default function Home() {
   const [isLoadingStorage, setIsLoadingStorage] = useState(true);
   const [masterAccounts, setMasterAccounts] = useState<Record<string, string>>({});
   const [isTableThousands, setIsTableThousands] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // ── プロフィール一覧を SQL から取得 ──────────────────────────
   const loadProfiles = useCallback(async () => {
@@ -452,12 +453,15 @@ export default function Home() {
           </div>
         </header>
 
-        <section className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-          <div className="lg:col-span-1 space-y-6">
+        <section className={cn("grid grid-cols-1 gap-8", sidebarCollapsed ? "lg:grid-cols-1" : "lg:grid-cols-5")}>
+          <div className={cn("space-y-6", sidebarCollapsed && "hidden")}>
             <Card className="p-5 border-none shadow-md space-y-6 bg-white">
               <div className="space-y-4">
-                <h3 className="font-bold text-sm text-slate-800 flex items-center gap-2 border-b pb-2">
-                  <PlusCircle className="h-4 w-4 text-indigo-500" /> 基準年度・企業の設定
+                <h3 className="font-bold text-sm text-slate-800 flex items-center justify-between gap-2 border-b pb-2">
+                  <span className="flex items-center gap-2"><PlusCircle className="h-4 w-4 text-indigo-500" /> 基準年度・企業の設定</span>
+                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-slate-400 hover:text-slate-700" onClick={() => setSidebarCollapsed(true)} title="設定を折りたたむ">
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
                 </h3>
 
                 <div className="space-y-4">
@@ -587,7 +591,17 @@ export default function Home() {
             )}
           </div>
 
-          <div className="lg:col-span-4">
+          <div className={cn(sidebarCollapsed ? "lg:col-span-1" : "lg:col-span-4")}>
+            {sidebarCollapsed && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mb-3 gap-1.5 text-xs text-slate-500 border-slate-200 hover:text-indigo-600 hover:border-indigo-300"
+                onClick={() => setSidebarCollapsed(false)}
+              >
+                <ChevronRight className="h-3.5 w-3.5" /> 設定を表示
+              </Button>
+            )}
             {isLoadingStorage ? (
               <Card className="h-96 flex items-center justify-center border-dashed">
                 <div className="text-center text-gray-400">

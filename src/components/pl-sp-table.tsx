@@ -36,9 +36,8 @@ export function PLSpTable({ data, isThousands = true, fiscalYear = "2026" }: PLS
             : { jp: `${prevYear}年度 実績` };
 
         return (
-            <div className="h-[700px] w-full overflow-auto">
-                <div className="min-w-[1900px]">
-                    <Table>
+            <div className="h-[700px] w-full overflow-y-auto">
+                    <Table className="min-w-[1900px]">
                         <TableHeader>
                             <TableRow className="bg-slate-50 hover:bg-slate-50">
                                 <TableHead className="w-[80px] sticky left-0 bg-slate-50 z-20 border-r font-bold text-slate-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Code</TableHead>
@@ -53,14 +52,14 @@ export function PLSpTable({ data, isThousands = true, fiscalYear = "2026" }: PLS
                         </TableHeader>
                         <TableBody>
                             {plRows.map((row, idx) => (
-                                <TableRow key={`${row.department}-${row.code}-${row.subject}`} className={idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"}>
+                                <TableRow key={`${row.department}-${row.code}-${row.subject}`} className={idx % 2 === 0 ? "bg-white" : "bg-slate-50"}>
                                     <TableCell className={cn(
                                         "font-mono text-xs text-slate-500 sticky left-0 z-10 border-r shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
-                                        idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
+                                        idx % 2 === 0 ? "bg-white" : "bg-slate-50"
                                     )}>{row.code}</TableCell>
                                     <TableCell className={cn(
                                         "sticky left-[80px] border-r font-medium text-sm z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]",
-                                        idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
+                                        idx % 2 === 0 ? "bg-white" : "bg-slate-50"
                                     )}>{row.subject}</TableCell>
 
                                     {MONTH_ORDER.map(m => {
@@ -86,7 +85,6 @@ export function PLSpTable({ data, isThousands = true, fiscalYear = "2026" }: PLS
                             ))}
                         </TableBody>
                     </Table>
-                </div>
             </div>
         );
     };
