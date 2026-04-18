@@ -42,7 +42,14 @@ const findValue = (
     const SECOND_HALF = [9, 10, 11, 0, 1, 2];
 
     const getPeriodMonths = (p: Period): number[] => {
-        if (typeof p === 'number') return [p];
+        if (typeof p === 'number') {
+            if (isStock) {
+                // For B/S items, look back to the latest non-zero value in the fiscal year up to p
+                const pIdx = FISCAL_MONTH_ORDER.indexOf(p);
+                if (pIdx >= 0) return FISCAL_MONTH_ORDER.slice(0, pIdx + 1);
+            }
+            return [p];
+        }
         let months = p === '1H' ? FIRST_HALF : p === '2H' ? SECOND_HALF : FISCAL_MONTH_ORDER;
         if (globalLatestMonth !== undefined && !useBudget) {
             const cutOffIdx = FISCAL_MONTH_ORDER.indexOf(globalLatestMonth);
@@ -751,11 +758,13 @@ export const analyzeFinancials = (data: PnLData): FinancialReport => {
         return { name: deptName, sales, profit, margin: sales ? (profit / sales) * 100 : 0 };
     }).filter(d => d.sales !== 0 || d.profit !== 0);
 
-    // --- New: TOP 10 SGA Analysis ---
+    // --- New: TOP 10 SGA Analysis (人件費を除く) ---
+    const PERSONNEL_KEYWORDS = ['人件費', '給料', '給与', '賞与', '退職', '法定福利', '福利厚', '社会保険', '雇用保険', '労働保険'];
     const sgaRows = data.rows.filter(r =>
         (r.department.includes('販売費及び一般管理費') || r.department.includes('合併') || r.department.includes('一覧')) &&
         !/合計|計$/.test(r.subject) &&
-        !['販売費及び一般管理費', '（販管人件費）', '（一般管理費）', '（関係会社費用）'].includes(r.subject.trim())
+        !['販売費及び一般管理費', '（販管人件費）', '（一般管理費）', '（関係会社費用）'].includes(r.subject.trim()) &&
+        !PERSONNEL_KEYWORDS.some(k => r.subject.includes(k))
     );
     report.sgaTop10 = sgaRows
         .map(r => {

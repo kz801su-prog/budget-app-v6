@@ -36,12 +36,33 @@ export function DeptDashboard({ data, selectedDepartment, companyName, fiscalYea
         getAllEmployeeCounts(companyName, fiscalYear).then(counts => setEmployeeCounts(counts));
     }, [companyName, fiscalYear]);
 
-    const CORE_KEYWORDS = ['貸借対照表', '損益計算書', '販売費及び一般管理費', '販売費', '合併', '連結'];
+    const CORE_KEYWORDS = [
+        '貸借対照表', 'B/S', 'BS',
+        '損益計算書', 'P/L', 'PL',
+        '販売費及び一般管理費', '販売費', '一般管理費',
+        '合併', '連結',
+        '製造原価',
+        '月次一覧', '一覧表',
+        'キャッシュ',
+        '全社合計', '全体合計',
+    ];
     const isCoreSheet = (dept: string) => CORE_KEYWORDS.some(k => dept.includes(k));
 
     const departments = useMemo(() => {
-        const depts = [...new Set(data.rows.map(r => r.department))];
-        return depts.filter(d => !isCoreSheet(d));
+        // Use data.departments (actual Excel sheet names) to restrict to real sheets
+        const sheetNames = data.departments && data.departments.length > 0
+            ? data.departments
+            : [...new Set(data.rows.map(r => r.department))];
+        return sheetNames.filter(d => {
+            if (isCoreSheet(d)) return false;
+            // Only include sheets that have actual row data in this dataset
+            const deptRows = data.rows.filter(r => r.department === d);
+            if (deptRows.length === 0) return false;
+            // Require at least some annual value (actual or budget)
+            return deptRows.some(r =>
+                (r.totalAnnual.actual !== 0 || r.totalAnnual.budget !== 0)
+            );
+        });
     }, [data]);
 
     const deptReports = useMemo(() => {

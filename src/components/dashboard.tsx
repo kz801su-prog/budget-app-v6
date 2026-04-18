@@ -39,7 +39,8 @@ export function Dashboard({ report, data }: DashboardProps) {
         return monthIndices.map((mIdx, i) => {
             const sales = report.values['sales']?.[mIdx] || 0;
             const opProfit = report.values['operating_profit']?.[mIdx] || 0;
-            const margin = report.values['operating_margin']?.[mIdx] || 0;
+            // Compute margin directly from fetched values to avoid inconsistency
+            const margin = sales ? parseFloat(((opProfit / sales) * 100).toFixed(1)) : 0;
             const opCF = report.values['operating_cf']?.[mIdx] || 0;
             const invCF = report.values['investing_cf']?.[mIdx] || 0;
             const fcf = report.values['free_cf']?.[mIdx] || 0;
@@ -49,7 +50,7 @@ export function Dashboard({ report, data }: DashboardProps) {
                 name: monthNames[i],
                 sales: sales / 1000,
                 opProfit: opProfit / 1000,
-                margin: parseFloat(margin.toFixed(1)),
+                margin,
                 opCF: opCF / 1000,
                 invCF: invCF / 1000,
                 fcf: fcf / 1000,
@@ -286,7 +287,7 @@ export function Dashboard({ report, data }: DashboardProps) {
                         <SafetyMetric label="流動比率" value={report.values['current_ratio']?.['FY'] || 0} unit="%" threshold={150} />
                         <SafetyMetric label="当座比率" value={report.values['quick_ratio']?.['FY'] || 0} unit="%" threshold={100} />
                         <SafetyMetric label="有利子負債依存度" value={report.values['debt_dependency']?.['FY'] || 0} unit="%" threshold={50} isInverse />
-                        <SafetyMetric label="利払い能力" value={report.values['interest_coverage']?.['FY'] || 0} unit="倍" threshold={1.5} />
+                        <SafetyMetric label="利払い能力" value={Math.max(0, report.values['interest_coverage']?.['FY'] || 0)} unit="倍" threshold={1.5} />
                         <SafetyMetric label="損益分岐点比率" value={report.values['breakeven_ratio']?.['FY'] || 0} unit="%" threshold={80} isInverse />
                     </div>
                 </Card>
@@ -395,11 +396,11 @@ export function Dashboard({ report, data }: DashboardProps) {
                         <div className="flex justify-between items-start mb-4">
                             <h3 className="text-lg font-bold flex items-center gap-2">
                                 <div className="w-1 h-6 bg-indigo-600 rounded-full" />
-                                事業部別売上・利益 <span className="text-sm font-normal text-slate-500 ml-2">(Departmental Sales & Profit)</span>
+                                事業部別売上・利益（通期）<span className="text-sm font-normal text-slate-500 ml-2">(Full Year - 3 Business Units)</span>
                             </h3>
                             <span className="text-[10px] text-slate-400 font-medium bg-slate-50 px-2 py-0.5 rounded border">単位: 千円</span>
                         </div>
-                        <div className="h-80">
+                        <div className="h-52">
                             <ResponsiveContainer width="100%" height="100%">
                                 <ComposedChart data={departmentalPerformanceData}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -410,7 +411,6 @@ export function Dashboard({ report, data }: DashboardProps) {
                                         tickLine={false}
                                         axisLine={false}
                                         tickFormatter={(val) => `${Math.floor(val / 1000).toLocaleString()}`}
-                                        label={{ value: '売上高 (千円)', angle: -90, position: 'insideLeft', style: { fontSize: 10 } }}
                                     />
                                     <YAxis
                                         yAxisId="right"
@@ -419,7 +419,6 @@ export function Dashboard({ report, data }: DashboardProps) {
                                         tickLine={false}
                                         axisLine={false}
                                         tickFormatter={(val) => `${Math.floor(val / 1000).toLocaleString()}`}
-                                        label={{ value: '利益 (千円)', angle: 90, position: 'insideRight', style: { fontSize: 10 } }}
                                     />
                                     <Tooltip content={<CustomTooltip />} />
                                     <Legend iconType="circle" />
@@ -428,6 +427,27 @@ export function Dashboard({ report, data }: DashboardProps) {
                                 </ComposedChart>
                             </ResponsiveContainer>
                         </div>
+                        {/* Comparison table */}
+                        <table className="w-full text-xs mt-3 border-t border-slate-100">
+                            <thead className="text-slate-400 bg-slate-50">
+                                <tr>
+                                    <th className="px-2 py-1.5 text-left font-semibold">事業部</th>
+                                    <th className="px-2 py-1.5 text-right font-semibold">売上高（通期）</th>
+                                    <th className="px-2 py-1.5 text-right font-semibold">営業利益</th>
+                                    <th className="px-2 py-1.5 text-right font-semibold">利益率</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {departmentalPerformanceData.map((d, i) => (
+                                    <tr key={i} className="hover:bg-slate-50">
+                                        <td className="px-2 py-1.5 font-medium text-slate-700">{d.name}</td>
+                                        <td className="px-2 py-1.5 text-right">{Math.floor(d.sales / 1000).toLocaleString()}</td>
+                                        <td className={`px-2 py-1.5 text-right font-bold ${d.profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{Math.floor(d.profit / 1000).toLocaleString()}</td>
+                                        <td className={`px-2 py-1.5 text-right ${d.margin >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>{d.margin.toFixed(1)}%</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
                     </Card>
 
                     {/* --- 2. SGA Top 10 Analysis --- */}
@@ -668,6 +688,52 @@ export function Dashboard({ report, data }: DashboardProps) {
                     </Card>
                 </div>
 
+                {/* === 仮想株価分析 (20万株) === */}
+                {(() => {
+                    const TOTAL_SHARES = 200000;
+                    const equity = (() => {
+                        // Derive equity from ROE and net income (FY), or use BPS*shares
+                        const bps = report.values['bps']?.['FY'] || 0;
+                        return bps * TOTAL_SHARES;
+                    })();
+                    const eps = report.values['eps']?.['FY'] || 0;
+                    const bps = report.values['bps']?.['FY'] || 0;
+                    const estPrice = report.values['estimated_stock_price_pbr']?.['FY'] || 0;
+                    const marketCap = estPrice * TOTAL_SHARES;
+                    const roe = report.values['roe']?.['FY'] || 0;
+                    const roa = report.values['roa']?.['FY'] || 0;
+                    const ebitda = (report.values['ebitda']?.['FY'] || 0);
+                    const sales = report.values['sales']?.['FY'] || 0;
+                    const ebitdaMargin = sales ? (ebitda / sales) * 100 : 0;
+                    const evEbitda = report.values['ev_ebitda']?.['FY'] || 0;
+
+                    return (
+                        <Card className="p-6">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="text-lg font-bold flex items-center gap-2">
+                                    <div className="w-1 h-6 bg-violet-600 rounded-full" />
+                                    仮想株価分析（発行済株式 20万株）<span className="text-sm font-normal text-slate-500 ml-2">(Virtual Stock Price Analysis)</span>
+                                </h3>
+                                <span className="text-[10px] text-slate-400 font-medium bg-slate-50 px-2 py-0.5 rounded border">PBR法 × 1.5倍</span>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+                                <StockMetric label="EPS" sub="1株当たり純利益" value={eps.toLocaleString(undefined, { maximumFractionDigits: 0 })} unit="円" />
+                                <StockMetric label="BPS" sub="1株当たり純資産" value={bps.toLocaleString(undefined, { maximumFractionDigits: 0 })} unit="円" />
+                                <StockMetric label="推定株価" sub="PBR法 (×1.5)" value={estPrice.toLocaleString(undefined, { maximumFractionDigits: 0 })} unit="円" highlight />
+                                <StockMetric label="推定時価総額" sub="株価×20万株" value={`${(marketCap / 1000000).toFixed(1)}百万`} unit="円" />
+                                <StockMetric label="ROE" sub="自己資本利益率" value={roe.toFixed(1)} unit="%" color={roe > 8 ? 'emerald' : 'amber'} />
+                                <StockMetric label="ROA" sub="総資産利益率" value={roa.toFixed(1)} unit="%" color={roa > 5 ? 'emerald' : 'amber'} />
+                                <StockMetric label="EBITDA率" sub="EBITDA / 売上高" value={ebitdaMargin.toFixed(1)} unit="%" color={ebitdaMargin > 10 ? 'emerald' : 'amber'} />
+                            </div>
+                            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-6 text-xs text-slate-500">
+                                <span>EV/EBITDA: <span className="font-bold text-slate-700">{evEbitda.toFixed(1)}倍</span></span>
+                                <span>EBITDA: <span className="font-bold text-slate-700">{(ebitda / 1000).toLocaleString(undefined, { maximumFractionDigits: 0 })}千円</span></span>
+                                <span className="text-[10px] text-slate-400">※ 推定株価 = BPS × 業界平均PBR（1.5倍）。ROE・ROAは当期純利益ベース。</span>
+                            </div>
+                        </Card>
+                    );
+                })()}
+
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     {/* Chart 5: EBITDA */}
                     <Card className="p-6 overflow-hidden">
@@ -762,6 +828,18 @@ function SafetyMetric({ label, value, unit, threshold, isInverse }: { label: str
             <p className="text-[10px] text-slate-400 mt-2">
                 目安: {isInverse ? `${threshold}${unit}以下` : `${threshold}${unit}以上`}
             </p>
+        </div>
+    );
+}
+
+function StockMetric({ label, sub, value, unit, highlight, color }: { label: string, sub: string, value: string, unit: string, highlight?: boolean, color?: string }) {
+    const bg = highlight ? 'bg-violet-50 border-violet-200' : 'bg-slate-50 border-slate-200';
+    const textColor = color === 'emerald' ? 'text-emerald-600' : color === 'amber' ? 'text-amber-600' : highlight ? 'text-violet-700' : 'text-slate-800';
+    return (
+        <div className={`p-3 rounded-xl border ${bg}`}>
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">{label}</p>
+            <p className="text-[9px] text-slate-400 mb-1">{sub}</p>
+            <div className={`text-lg font-bold ${textColor}`}>{value}<span className="text-xs font-normal ml-0.5">{unit}</span></div>
         </div>
     );
 }
